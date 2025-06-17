@@ -35,20 +35,31 @@ class udpTrackerAnnouncing:
                 + self.downloaded + self.left + self.uploaded + self.event + self.ip + self.key + self.num_want + self.port)
     
     def parse_response(self, response):
-        server_action = struct.unpack('>I', response[:4])
-        transaction_id = struct.unpack('>I', response[4 : 8])
-        interval = struct.unpack('>I', response[8:12])
-        leechers = struct.unpack('>I' ,response[12:16])
-        seeders = struct.unpack('>I', response[16 : 20])
-        info = list([str(x) for x in response[20:]])
-        ip_port = []
-        for i in range(int(len(info) / 6)):
-            start = i * 6
-            end = start + 6
-            ip = ".".join(info[start:(end - 2)])
-            raw_port = info[(end - 2):end]
-
-            port = int(raw_port[1]) + int(raw_port[0]) * 256
-
-            ip_port.append((ip, port))
-        return ip_port
+        if len(response) < 20:  # Minimum response size
+            return []
+            
+        try:
+            server_action = struct.unpack('>I', response[:4])[0]
+            transaction_id = struct.unpack('>I', response[4:8])[0]
+            interval = struct.unpack('>I', response[8:12])[0]
+            leechers = struct.unpack('>I', response[12:16])[0]
+            seeders = struct.unpack('>I', response[16:20])[0]
+            
+            ip_port = []
+            offset = 20
+            
+            # Parse peer information
+            while offset + 6 <= len(response):
+                ip_bytes = response[offset:offset+4]
+                port_bytes = response[offset+4:offset+6]
+                
+                ip = socket.inet_ntoa(ip_bytes)
+                port = struct.unpack('>H', port_bytes)[0]
+                
+                ip_port.append((ip, port))
+                offset += 6
+                
+            return ip_port
+        except Exception as e:
+            log_error(f"Error parsing UDP tracker response: {e}")
+            return []

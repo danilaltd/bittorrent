@@ -24,6 +24,7 @@ class Peer:
         self.peer_interested = 0
         self.last_transmission = None
         self.rate = None
+        self.uploaded = 0  # Track bytes uploaded to this peer
     def connect_to_peer(self):
         if validIPAddress(self.ip_port[0]) == "IPv6":
             self.sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)

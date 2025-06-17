@@ -1,4 +1,3 @@
-
 import struct
 from bitstring import *
 from BlockandPiece import Piece
@@ -42,6 +41,9 @@ class unchoke:
             return 1
         else:
             return -1
+            
+    def byteStringForUnchoke(self):
+        return struct.pack('>IB', self.length, self.message_ID)
 
 class interested:
     # interested: <len=0001><id=2>

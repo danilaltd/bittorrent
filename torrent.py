@@ -14,7 +14,7 @@ class Torrent:
     def decode_bencoded_file(self):
         with open(self.torrent_path, 'rb') as file:
             contents = bdecode(file)
-        with open('torrent.txt', 'w') as file:
+        with open("torrent.txt", "w", encoding="utf-8") as file:
             for key, value in contents.items():
                 file.write(f"{str(key)} : {str(value)}")
                 file.write("\n\n")
