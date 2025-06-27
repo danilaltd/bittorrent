@@ -1,6 +1,19 @@
 import struct, random
 from sys import int_info
 import socket
+from datetime import datetime
+import os
+
+def log_error(msg, exc=None):
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        if exc is not None:
+            log_entry = f'[{timestamp}] {msg}: {exc}\n'
+        else:
+            log_entry = f'[{timestamp}] {msg}\n'
+            
+        with open(os.path.join('logs', "bittorrent.log"), 'a', encoding='utf-8') as f:
+            f.write(log_entry)
+
 class udpTrackerConnecting:
     def __init__(self):
         self.connection_id = struct.pack('>Q', 0x41727101980)
@@ -61,5 +74,7 @@ class udpTrackerAnnouncing:
                 
             return ip_port
         except Exception as e:
+            print("\n\nbef\n\n")
             log_error(f"Error parsing UDP tracker response: {e}")
+            print("\n\naft\n\n")
             return []

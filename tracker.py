@@ -12,19 +12,32 @@ import errno
 from urllib.parse import urlparse
 import threading
 import sys
+from datetime import datetime
+import os
 
 def log_info(msg):
     GREEN = '\033[92m'
     END = '\033[0m'
     print(f'{GREEN}[INFO] {msg}{END}')
 
+# def log_error(msg, exc=None):
+#     RED = '\033[91m'
+#     END = '\033[0m'
+#     if exc is not None:
+#         print(f'{RED}[ERROR] {msg}: {exc}{END}', file=sys.stderr)
+#     else:
+#         print(f'{RED}[ERROR] {msg}{END}', file=sys.stderr)
+
 def log_error(msg, exc=None):
-    RED = '\033[91m'
-    END = '\033[0m'
-    if exc is not None:
-        print(f'{RED}[ERROR] {msg}: {exc}{END}', file=sys.stderr)
-    else:
-        print(f'{RED}[ERROR] {msg}{END}', file=sys.stderr)
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        if exc is not None:
+            log_entry = f'[{timestamp}] {msg}: {exc}\n'
+        else:
+            log_entry = f'[{timestamp}] {msg}\n'
+            
+        with open(os.path.join('logs', "bittorrent.log"), 'a', encoding='utf-8') as f:
+            f.write(log_entry)
+    
 
 class Tracker:
     def __init__(self, torrent_path, file_path):
@@ -41,6 +54,7 @@ class Tracker:
 
     def start_periodic_updates(self):
         """Start periodic tracker updates in a separate thread"""
+        print("starting periodic updates")
         self.tracker_update_thread = threading.Thread(target=self._periodic_update)
         self.tracker_update_thread.daemon = True
         self.tracker_update_thread.start()
@@ -55,9 +69,6 @@ class Tracker:
         """Periodically update trackers with current stats"""
         while self.running:
             try:
-                # Wait for the update interval
-                time.sleep(self.update_interval)
-                
                 # Update all trackers
                 for url in self.torrent_obj.announce_list:
                     t = None
@@ -74,6 +85,9 @@ class Tracker:
                 
             except Exception as e:
                 log_error(f"Error in periodic tracker update: {e}")
+            finally:
+                # Wait for the update interval
+                time.sleep(self.update_interval)    
 
     def update_stats(self, downloaded, uploaded):
         """Update download/upload statistics"""
@@ -112,11 +126,21 @@ class Tracker:
         }
         
         max_retries = 3
-        retry_delay = 2
+        retry_delay = 1
         
         for attempt in range(max_retries):
             try:
-                answer_tracker = requests.get(tracker_url, params=payload, timeout=5)
+                # Try to resolve DNS first
+                try:
+                    socket.gethostbyname(url_parse.hostname)
+                except socket.gaierror as e:
+                    log_error(f"DNS resolution failed for {url_parse.hostname} (attempt {attempt + 1}/{max_retries})", e)
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay * (attempt + 1))
+                        continue
+                    return
+
+                answer_tracker = requests.get(tracker_url, params=payload, timeout=10)  # Increased timeout
                 response = bdecode(answer_tracker.content)
                 
                 if 'interval' in response:
@@ -152,15 +176,16 @@ class Tracker:
                 log_info(f"Successfully got {len(self.peers)} peers from {tracker_url}")
                 return  # Success, exit the function
             except requests.exceptions.ConnectionError as e:
-                if "Name or service not known" in str(e) or "DNS resolution failed" in str(e):
-                    log_error(f"DNS resolution failed for {tracker_url} (attempt {attempt + 1}/{max_retries})", e)
-                    if attempt < max_retries - 1:
-                        time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
-                        continue
-                log_error(f"Connection error for {tracker_url}", e)
+                log_error(f"Connection error for {tracker_url} (attempt {attempt + 1}/{max_retries})", e)
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay * (attempt + 1))
+                    continue
                 return
             except Exception as e:
-                log_error(f"Error connecting to tracker {tracker_url}", e)
+                log_error(f"Error connecting to tracker {tracker_url} (attempt {attempt + 1}/{max_retries})", e)
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay * (attempt + 1))
+                    continue
                 return
 
     def udp_request(self, tracker_url, event='started'):
@@ -245,8 +270,9 @@ class Tracker:
         if len(completeMessage) <= 0:
             log_error('Не удалось получить список пиров от трекера')
             return
-
         ip_ports = tracker_announce.parse_response(completeMessage)
+        # print(f"url_parse {url_parse}\nserver_connection_id {tracker_connection.server_connection_id},\ninfo_hash {self.torrent_obj.info_hash},\npeer_id {self.torrent_obj.peer_id},\nleft {self.left},\nsender_port {sender_port}\ncompleteMessage {completeMessage}\n\n")
         for x in ip_ports:
             self.peers.add(x)
+            # print(x)
         log_info(f'Получено {len(ip_ports)} пиров от трекера')

@@ -2,12 +2,18 @@ BLOCK_SIZE = 16384
 from math import ceil
 import random
 import hashlib
+from enum import Enum
+
+class BlockStatus(Enum):
+    EMPTY = 0
+    REQUESTED = 1
+    RECEIVED = 2
 
 class Block:
     def __init__(self, block_size = BLOCK_SIZE, raw_bytes = b""):
         self.block_size = block_size
         self.data = raw_bytes
-        self.status = 0
+        self.status = BlockStatus.EMPTY
         self.last_requested = None
 
 class Piece:
@@ -30,9 +36,15 @@ class Piece:
     
     def is_complete(self):
         for block in self.blocks:
-            if block.status == 0 or not block.data:
+            if block.status == BlockStatus.EMPTY or not block.data:
                 return False
-        return True        
+        return True  
+    
+    def is_requested(self):
+        for block in self.blocks:
+            if block.status == BlockStatus.REQUESTED:
+                return True
+        return False        
 
     def verify_piece(self):
         if not self.is_complete():
