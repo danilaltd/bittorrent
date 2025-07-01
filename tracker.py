@@ -1,39 +1,29 @@
 from torrent import Torrent
-import ipaddress
-from bcoding import bencode, bdecode
+from bcoding import bdecode
 from udp import udpTrackerAnnouncing, udpTrackerConnecting
 import requests
 import struct
-import random
 import socket
 import time
 import errno
-
 from urllib.parse import urlparse
 import threading
-import sys
 from datetime import datetime
 import os
 
 def log_info(msg):
-    GREEN = '\033[92m'
-    END = '\033[0m'
-    print(f'{GREEN}[INFO] {msg}{END}')
-
-# def log_error(msg, exc=None):
-#     RED = '\033[91m'
-#     END = '\033[0m'
-#     if exc is not None:
-#         print(f'{RED}[ERROR] {msg}: {exc}{END}', file=sys.stderr)
-#     else:
-#         print(f'{RED}[ERROR] {msg}{END}', file=sys.stderr)
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        log_entry = f'[{timestamp}][Error][INFO] {msg}\n'
+            
+        with open(os.path.join('logs', "bittorrent.log"), 'a', encoding='utf-8') as f:
+            f.write(log_entry)
 
 def log_error(msg, exc=None):
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         if exc is not None:
-            log_entry = f'[{timestamp}] {msg}: {exc}\n'
+            log_entry = f'[{timestamp}][Error] {msg}: {exc}\n'
         else:
-            log_entry = f'[{timestamp}] {msg}\n'
+            log_entry = f'[{timestamp}][Error] {msg}\n'
             
         with open(os.path.join('logs', "bittorrent.log"), 'a', encoding='utf-8') as f:
             f.write(log_entry)
@@ -51,6 +41,7 @@ class Tracker:
         self.last_update = time.time()
         self.update_interval = 1800  # Default interval in seconds
         self.running = True
+        self.peers_lock = threading.Lock()
 
     def start_periodic_updates(self):
         """Start periodic tracker updates in a separate thread"""
@@ -94,18 +85,6 @@ class Tracker:
         self.downloaded = downloaded
         self.uploaded = uploaded
         self.left = max(0, self.torrent_obj.total_length - downloaded)
-
-    def get_peer_list(self):
-        """Initial peer list request"""
-        for url in self.torrent_obj.announce_list:
-            t = None
-            if "http" in url:
-                t = threading.Thread(target=self.http_request, args=(url, 'started'))
-            if "udp" in url:
-                t = threading.Thread(target=self.udp_request, args=(url, 'started'))
-            if t:
-                t.start()
-                self.tracker_threads.append(t)
 
     def exitAllThreads(self):
         """Stop all tracker communication threads"""
@@ -162,13 +141,15 @@ class Tracker:
                         port = struct.unpack_from("!H", response['peers'], offset)[0]
                         offset += 2
                         ip_port = (ip, port)
-                        self.peers.add(ip_port)
+                        with self.peers_lock:
+                            self.peers.add(ip_port)
                 elif isinstance(response['peers'], list):
                     # Dictionary format
                     for peer in response['peers']:
                         if isinstance(peer, dict) and 'ip' in peer and 'port' in peer:
                             ip_port = (peer['ip'], peer['port'])
-                            self.peers.add(ip_port)
+                            with self.peers_lock:
+                                self.peers.add(ip_port)
                 else:
                     log_error(f"Unknown peer format from {tracker_url}")
                     return
@@ -271,8 +252,7 @@ class Tracker:
             log_error('Не удалось получить список пиров от трекера')
             return
         ip_ports = tracker_announce.parse_response(completeMessage)
-        # print(f"url_parse {url_parse}\nserver_connection_id {tracker_connection.server_connection_id},\ninfo_hash {self.torrent_obj.info_hash},\npeer_id {self.torrent_obj.peer_id},\nleft {self.left},\nsender_port {sender_port}\ncompleteMessage {completeMessage}\n\n")
-        for x in ip_ports:
-            self.peers.add(x)
-            # print(x)
+        with self.peers_lock:
+            for x in ip_ports:
+                self.peers.add(x)
         log_info(f'Получено {len(ip_ports)} пиров от трекера')

@@ -123,6 +123,25 @@ class pieceMessage:
         else:
             return -1
 
+class Handshake():
+    def __init__(self, peer_id, info_hash):
+        pstr = b"BitTorrent protocol"
+        self.info_hash = info_hash
+        self.peer_id = peer_id
+        self.pstr = pstr
+        self.pstrlen = len(pstr)
+        self.reserved = b'x\00' * 8
+        self.handshake = struct.pack(">B{}s8s20s20s".format(self.pstrlen),
+                            self.pstrlen,
+                            self.pstr,
+                            self.reserved,
+                            self.info_hash,
+                            self.peer_id)
+    def getHandshakeBytes(self):
+        return self.handshake
+
+
+
 
 
 
