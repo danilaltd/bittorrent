@@ -1,5 +1,5 @@
 from math import pi
-from BlockandPiece import BLOCK_SIZE, Block, Piece, BlockStatus
+from BlockandPiece import BLOCK_SIZE, BlockStatus
 from peer import Peer
 from Messages import Handshake
 from tracker import Tracker
@@ -61,188 +61,188 @@ def log_info(msg, flags = None):
 class PeerManager:
     def __init__(self, tracker_obj: Tracker):
         self._tracker_obj: Tracker = tracker_obj
-        self._tracker_obj_lock = RWLock()
+        self._tracker_obj_lock = RWLock("_tracker_obj_lock")
         self._peers: list[Peer] = []
-        self._peers_lock = RWLock()
+        self._peers_lock = RWLock("_peers_lock")
         self._connected_peers: list[Peer] = []
-        self._connected_peers_lock = RWLock()
+        self._connected_peers_lock = RWLock("_connected_peers_lock")
         self._threads = {}
-        self._threads_lock = RWLock()
+        self._threads_lock = RWLock("_threads_lock")
         self._piece_manager = PieceInfo(tracker_obj.torrent_obj)
-        self._piece_manager_lock = RWLock()
+        self._piece_manager_lock = RWLock("_piece_manager_lock")
         self._torrent_completed = False
-        self._torrent_completed_lock = RWLock()
+        self._torrent_completed_lock = RWLock("_torrent_completed_lock")
         self._number_of_pieces = self._piece_manager.number_of_pieces
-        self._number_of_pieces_lock = RWLock()
+        self._number_of_pieces_lock = RWLock("_number_of_pieces_lock")
         self._optimistic_unchoke_interval = 30
-        self._optimistic_unchoke_interval_lock = RWLock()
+        self._optimistic_unchoke_interval_lock = RWLock("_optimistic_unchoke_interval_lock")
         self._last_optimistic_unchoke = time.time()
-        self._last_optimistic_unchoke_lock = RWLock()
+        self._last_optimistic_unchoke_lock = RWLock("_last_optimistic_unchoke_lock")
         self._optimistic_unchoke_peer = None
-        self._optimistic_unchoke_peer_lock = RWLock()
+        self._optimistic_unchoke_peer_lock = RWLock("_optimistic_unchoke_peer_lock")
         self._last_peer_update = time.time()
-        self._last_peer_update_lock = RWLock()
+        self._last_peer_update_lock = RWLock("_last_peer_update_lock")
         self._peer_update_interval = 30
-        self._peer_update_interval_lock = RWLock()
+        self._peer_update_interval_lock = RWLock("_peer_update_interval_lock")
         self._reconnect_interval = 10
-        self._reconnect_interval_lock = RWLock()
+        self._reconnect_interval_lock = RWLock("_reconnect_interval_lock")
         self._last_reconnect = time.time()
-        self._last_reconnect_lock = RWLock()
+        self._last_reconnect_lock = RWLock("_last_reconnect_lock")
         self._running = True
-        self._running_lock = RWLock()
+        self._running_lock = RWLock("_running_lock")
         self._rarest_piece_min_heap = self._piece_manager.getRarestPieceMinHeap(self._connected_peers)
-        self._rarest_piece_min_heap_lock = RWLock()
+        self._rarest_piece_min_heap_lock = RWLock("_rarest_piece_min_heap_lock")
         self._rarest_piece_thread = threading.Thread(target=self._periodic_rarest_piece_update)
         self._rarest_piece_thread.daemon = True
         self._rarest_piece_thread.start()
         self._peer_update_thread = threading.Thread(target=self._periodic_peer_update)
         self._peer_update_thread.daemon = True
         self._download_started = False
-        self._download_started_lock = RWLock()
+        self._download_started_lock = RWLock("_download_started_lock")
         self._peer_update_thread.start()
 
     @property
     def tracker_obj(self):
-        with self._tracker_obj_lock.read_access:
+        with timed_lock(self._tracker_obj_lock.read_access, "_tracker_obj_lock.read_access"):
             return self._tracker_obj
     @tracker_obj.setter
     def tracker_obj(self, value):
-        with self._tracker_obj_lock.write_access:
+        with timed_lock(self._tracker_obj_lock.write_access, "_tracker_obj_lock.write_access"):
             self._tracker_obj = value
 
     @property
     def peers(self):
-        with self._peers_lock.read_access:
+        with timed_lock(self._peers_lock.read_access, "_peers_lock.read_access"):
             return self._peers
     @peers.setter
     def peers(self, value):
-        with self._peers_lock.write_access:
+        with timed_lock(self._peers_lock.write_access, "_peers_lock.write_access"):
             self._peers = value
 
     @property
     def connected_peers(self):
-        with self._connected_peers_lock.read_access:
+        with timed_lock(self._connected_peers_lock.read_access, "_connected_peers_lock.read_access"):
             return self._connected_peers
     @connected_peers.setter
     def connected_peers(self, value):
-        with self._connected_peers_lock.write_access:
+        with timed_lock(self._connected_peers_lock.write_access, "_connected_peers_lock.write_access"):
             self._connected_peers = value
 
     @property
     def threads(self):
-        with self._threads_lock.read_access:
+        with timed_lock(self._threads_lock.read_access, "_threads_lock.read_access"):
             return self._threads
     @threads.setter
     def threads(self, value):
-        with self._threads_lock.write_access:
+        with timed_lock(self._threads_lock.write_access, "_threads_lock.write_access"):
             self._threads = value
 
     @property
     def piece_manager(self):
-        with self._piece_manager_lock.read_access:
+        with timed_lock(self._piece_manager_lock.read_access, "_piece_manager_lock.read_access"):
             return self._piece_manager
     @piece_manager.setter
     def piece_manager(self, value):
-        with self._piece_manager_lock.write_access:
+        with timed_lock(self._piece_manager_lock.write_access, "_piece_manager_lock.write_access"):
             self._piece_manager = value
 
     @property
     def torrent_completed(self):
-        with self._torrent_completed_lock.read_access:
+        with timed_lock(self._torrent_completed_lock.read_access, "_torrent_completed_lock.read_access"):
             return self._torrent_completed
     @torrent_completed.setter
     def torrent_completed(self, value):
-        with self._torrent_completed_lock.write_access:
+        with timed_lock(self._torrent_completed_lock.write_access, "_torrent_completed_lock.write_access"):
             self._torrent_completed = value
 
     @property
     def number_of_pieces(self):
-        with self._number_of_pieces_lock.read_access:
+        with timed_lock(self._number_of_pieces_lock.read_access, "_number_of_pieces_lock.read_access"):
             return self._number_of_pieces
     @number_of_pieces.setter
     def number_of_pieces(self, value):
-        with self._number_of_pieces_lock.write_access:
+        with timed_lock(self._number_of_pieces_lock.write_access, "_number_of_pieces_lock.write_access"):
             self._number_of_pieces = value
 
     @property
     def optimistic_unchoke_interval(self):
-        with self._optimistic_unchoke_interval_lock.read_access:
+        with timed_lock(self._optimistic_unchoke_interval_lock.read_access, "_optimistic_unchoke_interval_lock.read_access"):
             return self._optimistic_unchoke_interval
     @optimistic_unchoke_interval.setter
     def optimistic_unchoke_interval(self, value):
-        with self._optimistic_unchoke_interval_lock.write_access:
+        with timed_lock(self._optimistic_unchoke_interval_lock.write_access, "_optimistic_unchoke_interval_lock.write_access"):
             self._optimistic_unchoke_interval = value
 
     @property
     def last_optimistic_unchoke(self):
-        with self._last_optimistic_unchoke_lock.read_access:
+        with timed_lock(self._last_optimistic_unchoke_lock.read_access, "_last_optimistic_unchoke_lock.read_access"):
             return self._last_optimistic_unchoke
     @last_optimistic_unchoke.setter
     def last_optimistic_unchoke(self, value):
-        with self._last_optimistic_unchoke_lock.write_access:
+        with timed_lock(self._last_optimistic_unchoke_lock.write_access, "_last_optimistic_unchoke_lock.write_access"):
             self._last_optimistic_unchoke = value
 
     @property
     def optimistic_unchoke_peer(self):
-        with self._optimistic_unchoke_peer_lock.read_access:
+        with timed_lock(self._optimistic_unchoke_peer_lock.read_access, "_optimistic_unchoke_peer_lock.read_access"):
             return self._optimistic_unchoke_peer
     @optimistic_unchoke_peer.setter
     def optimistic_unchoke_peer(self, value):
-        with self._optimistic_unchoke_peer_lock.write_access:
+        with timed_lock(self._optimistic_unchoke_peer_lock.write_access, "_optimistic_unchoke_peer_lock.write_access"):
             self._optimistic_unchoke_peer = value
 
     @property
     def last_peer_update(self):
-        with self._last_peer_update_lock.read_access:
+        with timed_lock(self._last_peer_update_lock.read_access, "_last_peer_update_lock.read_access"):
             return self._last_peer_update
     @last_peer_update.setter
     def last_peer_update(self, value):
-        with self._last_peer_update_lock.write_access:
+        with timed_lock(self._last_peer_update_lock.write_access, "_last_peer_update_lock.write_access"):
             self._last_peer_update = value
 
     @property
     def peer_update_interval(self):
-        with self._peer_update_interval_lock.read_access:
+        with timed_lock(self._peer_update_interval_lock.read_access, "_peer_update_interval_lock.read_access"):
             return self._peer_update_interval
     @peer_update_interval.setter
     def peer_update_interval(self, value):
-        with self._peer_update_interval_lock.write_access:
+        with timed_lock(self._peer_update_interval_lock.write_access, "_peer_update_interval_lock.write_access"):
             self._peer_update_interval = value
 
     @property
     def reconnect_interval(self):
-        with self._reconnect_interval_lock.read_access:
+        with timed_lock(self._reconnect_interval_lock.read_access, "_reconnect_interval_lock.read_access"):
             return self._reconnect_interval
     @reconnect_interval.setter
     def reconnect_interval(self, value):
-        with self._reconnect_interval_lock.write_access:
+        with timed_lock(self._reconnect_interval_lock.write_access, "_reconnect_interval_lock.write_access"):
             self._reconnect_interval = value
 
     @property
     def last_reconnect(self):
-        with self._last_reconnect_lock.read_access:
+        with timed_lock(self._last_reconnect_lock.read_access, "_last_reconnect_lock.read_access"):
             return self._last_reconnect
     @last_reconnect.setter
     def last_reconnect(self, value):
-        with self._last_reconnect_lock.write_access:
+        with timed_lock(self._last_reconnect_lock.write_access, "_last_reconnect_lock.write_access"):
             self._last_reconnect = value
 
     @property
     def running(self):
-        with self._running_lock.read_access:
+        with timed_lock(self._running_lock.read_access, "_running_lock.read_access"):
             return self._running
     @running.setter
     def running(self, value):
-        with self._running_lock.write_access:
+        with timed_lock(self._running_lock.write_access, "_running_lock.write_access"):
             self._running = value
 
     @property
     def rarest_piece_min_heap(self):
-        with self._rarest_piece_min_heap_lock.read_access:
+        with timed_lock(self._rarest_piece_min_heap_lock.read_access, "_rarest_piece_min_heap_lock.read_access"):
             return self._rarest_piece_min_heap
     @rarest_piece_min_heap.setter
     def rarest_piece_min_heap(self, value):
-        with self._rarest_piece_min_heap_lock.write_access:
+        with timed_lock(self._rarest_piece_min_heap_lock.write_access, "_rarest_piece_min_heap_lock.write_access"):
             self._rarest_piece_min_heap = value
 
     @property
@@ -253,34 +253,34 @@ class PeerManager:
         return self._peer_update_thread
     @property
     def download_started(self):
-        with self._download_started_lock.read_access:
+        with timed_lock(self._download_started_lock.read_access, "_download_started_lock.read_access"):
             return self._download_started
     @download_started.setter
     def download_started(self, value):
-        with self._download_started_lock.write_access:
+        with timed_lock(self._download_started_lock.write_access, "_download_started_lock.write_access"):
             self._download_started = value
 
     def _add_connected_peer(self, peer):
-        with self._connected_peers_lock.write_access:
+        with timed_lock(self._connected_peers_lock.write_access, "_connected_peers_lock.write_access"):
             if peer not in self._connected_peers:
                 self._connected_peers.append(peer)
         self.update_rarest_piece_min_heap()
 
     def _remove_connected_peer(self, peer):
-        with self._connected_peers_lock.write_access:
+        with timed_lock(self._connected_peers_lock.write_access, "_connected_peers_lock.write_access"):
             if peer in self._connected_peers:
                 self._connected_peers.remove(peer)
         self.update_rarest_piece_min_heap()
 
     def _clear_connected_peers(self):
-        with self._connected_peers_lock.write_access:
+        with timed_lock(self._connected_peers_lock.write_access, "_connected_peers_lock.write_access"):
             if self._connected_peers:
                 self._connected_peers.clear()
         self.update_rarest_piece_min_heap()
 
     def _extend_connected_peers(self, peers):
         added = False
-        with self._connected_peers_lock.write_access:
+        with timed_lock(self._connected_peers_lock.write_access, "_connected_peers_lock.write_access"):
             for peer in peers:
                 if peer not in self._connected_peers:
                     self._connected_peers.append(peer)
@@ -289,30 +289,30 @@ class PeerManager:
             self.update_rarest_piece_min_heap()
 
     def _insert_connected_peer(self, index, peer):
-        with self._connected_peers_lock.write_access:
+        with timed_lock(self._connected_peers_lock.write_access, "_connected_peers_lock.write_access"):
             if peer not in self._connected_peers:
                 self._connected_peers.insert(index, peer)
         self.update_rarest_piece_min_heap()
 
     def _pop_connected_peer(self, index=None):
         peer = None
-        with self._connected_peers_lock.write_access:
+        with timed_lock(self._connected_peers_lock.write_access, "_connected_peers_lock.write_access"):
             if self._connected_peers:
                 peer = self._connected_peers.pop(index) if index is not None else self._connected_peers.pop()
         self.update_rarest_piece_min_heap()
         return peer
 
     def _get_connected_peers_count(self):
-        with self._connected_peers_lock.read_access:
+        with timed_lock(self._connected_peers_lock.read_access, "_connected_peers_lock.read_access"):
             return len(self._connected_peers)
 
     def _is_peer_connected(self, peer):
-        with self._connected_peers_lock.read_access:
+        with timed_lock(self._connected_peers_lock.read_access, "_connected_peers_lock.read_access"):
             return peer in self._connected_peers
 
     def update_rarest_piece_min_heap(self):
-        with self._rarest_piece_min_heap_lock.write_access:
-            with self._connected_peers_lock.read_access:
+        with timed_lock(self._rarest_piece_min_heap_lock.write_access, "_rarest_piece_min_heap_lock.write_access"):
+            with timed_lock(self._connected_peers_lock.read_access, "_connected_peers_lock.read_access"):
                 self._rarest_piece_min_heap = self._piece_manager.getRarestPieceMinHeap(self._connected_peers)
 
     def _periodic_rarest_piece_update(self):
@@ -347,8 +347,8 @@ class PeerManager:
         log_info("Updating peer list from tracker...")
         try:
             self.last_peer_update = current_time
-            with self._peers_lock.write_access:
-                with self._tracker_obj.peers_lock:
+            with timed_lock(self._peers_lock.write_access, "_peers_lock.write_access"):
+                with timed_lock(self._tracker_obj.peers_lock, "_tracker_obj.peers_lock"):
                     peers_copy = self._tracker_obj.peers.copy()
                 for peer in peers_copy:
                     if peer not in self._peers:
@@ -361,8 +361,8 @@ class PeerManager:
 
     def _reconnect_peers(self):
         try:
-            with self._peers_lock.write_access:
-                with self._connected_peers_lock.read_access:
+            with timed_lock(self._peers_lock.write_access, "_peers_lock.write_access"):
+                with timed_lock(self._connected_peers_lock.read_access, "_connected_peers_lock.read_access"):
                     disconnected_peers = [p for p in self._peers if p not in self._connected_peers and p.connection_attempts < p.max_connection_attempts]
             if disconnected_peers:
                 log_info(f"Attempting to reconnect to {len(disconnected_peers)} peers...")
@@ -374,7 +374,7 @@ class PeerManager:
                     if self._get_connected_peers_count() >= MAX_CONNECTED_PEER:
                         break
                     try:
-                        with self._threads_lock.write_access:
+                        with timed_lock(self._threads_lock.write_access, "_threads_lock.write_access"):
                             if (peer in self._threads and self._threads[peer].is_alive()) or peer.bad_peer:
                                 continue
                             self.launch_thread(peer)
@@ -387,11 +387,11 @@ class PeerManager:
         self.running = False
         if self.peer_update_thread.is_alive():
             self.peer_update_thread.join(timeout=5)
-        with self._threads_lock.write_access:
+        with timed_lock(self._threads_lock.write_access, "_threads_lock.write_access"):
             for peer, thread in self._threads.items():
                 if thread.is_alive():
                     thread.join(timeout=5)
-        with self._connected_peers_lock.write_access:
+        with timed_lock(self._connected_peers_lock.write_access, "_connected_peers_lock.write_access"):
             for peer in self._connected_peers:
                 try:
                     if peer.sock:
@@ -399,9 +399,9 @@ class PeerManager:
                 except:
                     pass
             self._clear_connected_peers()
-        with self._peers_lock.write_access:
+        with timed_lock(self._peers_lock.write_access, "_peers_lock.write_access"):
             self._peers.clear()
-        with self._threads_lock.write_access:
+        with timed_lock(self._threads_lock.write_access, "_threads_lock.write_access"):
             self._threads.clear()
 
     def read_continously_from_sock(self, sock, peer: Peer):
@@ -410,38 +410,31 @@ class PeerManager:
                 
         try:
             while True:
-                print("read sock1")
                 try:
-                    print("read sock2")
                     if not sock or not peer.connected or peer.check_inactivity():
                         log_error(f"Invalid socket or peer state for {peer.ip_port}", flags = ['Reading'])
                         break
 
-                    print("read sock3")
                     message_length = self._read_bytes_from_sock(sock, 4, peer)
                     if not message_length:
                         log_error(f"Invalid message length from {peer.ip_port}: {len(message_length)}", flags = ['Reading'])
                         continue
                         
-                    print("read sock4")
                     message_length = struct.unpack(">I", message_length)[0]
                     if message_length == 0:
                         # Keep-alive message
                         peer.update_activity()
                         continue
                         
-                    print("read sock5")
                     message_ID = self._read_bytes_from_sock(sock, 1, peer)
                     if not message_ID:
                         log_error(f"Invalid message ID from {peer.ip_port}", flags = ['Reading'])
                         continue
                         
-                    print("read sock6")
                     message_ID_u = struct.unpack(">B", message_ID)[0]
                     peer.update_activity()
                     
                     # Handle message based on ID
-                    print("read sock7")
                     if message_ID_u == 0:  # Choke
                         peer.peer_choking = 1
                         log_info(f"Peer {peer.ip_port} choked us", flags = ['Reading'])
@@ -534,6 +527,7 @@ class PeerManager:
                                 continue
                                 
                             # Update block status safely
+                            # print(f"read sock got piece {piece_index}")
                             if self._piece_manager.update_block_status_safe(piece_index, block_index, BlockStatus.RECEIVED, block_data):
                             
                                 peer.blocks_recieved += 1
@@ -542,6 +536,8 @@ class PeerManager:
                                 piece_status = self.piece_manager.get_piece_status_safe(piece_index)
                                 if piece_status and not piece_status['is_complete'] and not piece_status['is_requested']:
                                     self._request_next_block(sock, piece.piece_index, peer)
+                            
+                            # print(f"read sock wrote {piece_index}")
                                 
                         except struct.error as e:
                             log_error(f"Error unpacking piece message from {peer.ip_port}", e, flags = ['Reading'])
@@ -568,7 +564,7 @@ class PeerManager:
             if self._is_peer_connected(peer):
                 self._remove_connected_peer(peer)
             if peer in self.threads:
-                with self._threads_lock.write_access:
+                with timed_lock(self._threads_lock.write_access, "_threads_lock.write_access"):
                     del self._threads[peer]
             try:
                 sock.close()
@@ -746,7 +742,7 @@ class PeerManager:
                 return
                 
             # Add peer to connected list with proper locking
-            with self._peers_lock.write_access:
+            with timed_lock(self._peers_lock.write_access, "_peers_lock.write_access"):
                 if peer not in self._peers:
                     self._peers.append(peer)
             self._add_connected_peer(peer)
@@ -775,7 +771,7 @@ class PeerManager:
             # Start reading thread
             sock.settimeout(None)  # Remove timeout for continuous reading
             t = threading.Thread(target=self.read_continously_from_sock, args=(sock, peer))
-            with self._threads_lock.write_access:
+            with timed_lock(self._threads_lock.write_access, "_threads_lock.write_access"):
                 self._threads[peer] = t
             t.start()
             
@@ -875,7 +871,7 @@ class PeerManager:
     def findRate(self):
         sum = 0
         n = 0
-        with self._connected_peers_lock.read_access:
+        with timed_lock(self._connected_peers_lock.read_access, "_connected_peers_lock.read_access"):
             for peer in self._connected_peers:
                 if peer.rate:
                     sum += peer.rate
@@ -891,7 +887,7 @@ class PeerManager:
         current_time = time.time()
         if current_time - self.last_optimistic_unchoke >= self.optimistic_unchoke_interval:
             # Find a random choked peer that we're interested in
-            with self._connected_peers_lock.read_access:
+            with timed_lock(self._connected_peers_lock.read_access, "_connected_peers_lock.read_access"):
                 choked_peers = [p for p in self._connected_peers if p.peer_choking and p.am_interested]
                 if choked_peers:
                     # Unchoke the previous optimistic peer if it exists
@@ -928,7 +924,7 @@ class PeerManager:
             max_i = 80
             
             # Защищаем доступ к peers
-            with self._connected_peers_lock.read_access:
+            with timed_lock(self._connected_peers_lock.read_access, "_connected_peers_lock.read_access"):
                 while not candidates and i < max_i:  # Ограничиваем количество итераций
                     for peer in peers:
                         try:
@@ -977,19 +973,19 @@ class PeerManager:
             return None
 
     def get_rarest_piece_min_heap_copy(self):
-        with self._rarest_piece_min_heap_lock.read_access:
+        with timed_lock(self._rarest_piece_min_heap_lock.read_access, "_rarest_piece_min_heap_lock.read_access"):
             return self._rarest_piece_min_heap.copy()
 
     def get_connected_peers_for_stats(self):
-        with self._connected_peers_lock.read_access:
+        with timed_lock(self._connected_peers_lock.read_access, "_connected_peers_lock.read_access"):
             return self._connected_peers.copy()
 
     def get_peers_for_progress(self):
-        with self._peers_lock.read_access:
+        with timed_lock(self._peers_lock.read_access, "_peers_lock.read_access"):
             return self._peers.copy()
 
-    def is_peer_in_connected_peers(self, peer):
-        with self._connected_peers_lock.read_access:
+    def is_peer_connected(self, peer):
+        with timed_lock(self._connected_peers_lock.read_access, "_connected_peers_lock.read_access"):
             return peer in self._connected_peers
 
     def print_lock_statistics(self):

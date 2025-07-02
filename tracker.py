@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 import threading
 from datetime import datetime
 import os
+from logger import timed_lock
 
 def log_info(msg):
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -141,14 +142,14 @@ class Tracker:
                         port = struct.unpack_from("!H", response['peers'], offset)[0]
                         offset += 2
                         ip_port = (ip, port)
-                        with self.peers_lock:
+                        with timed_lock(self.peers_lock, "peers_lock"):
                             self.peers.add(ip_port)
                 elif isinstance(response['peers'], list):
                     # Dictionary format
                     for peer in response['peers']:
                         if isinstance(peer, dict) and 'ip' in peer and 'port' in peer:
                             ip_port = (peer['ip'], peer['port'])
-                            with self.peers_lock:
+                            with timed_lock(self.peers_lock, "peers_lock"):
                                 self.peers.add(ip_port)
                 else:
                     log_error(f"Unknown peer format from {tracker_url}")
@@ -252,7 +253,7 @@ class Tracker:
             log_error('Не удалось получить список пиров от трекера')
             return
         ip_ports = tracker_announce.parse_response(completeMessage)
-        with self.peers_lock:
+        with timed_lock(self.peers_lock, "peers_lock"):
             for x in ip_ports:
                 self.peers.add(x)
         log_info(f'Получено {len(ip_ports)} пиров от трекера')

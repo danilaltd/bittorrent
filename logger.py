@@ -37,7 +37,7 @@ class Logger:
     def lock_wait(lock_name, wait_time, thread_name=None):
         """Логирует время ожидания lock"""
         thread_info = f" (thread: {thread_name})" if thread_name else ""
-        if wait_time > 0.01:  # Логируем только если ждали больше 100мс
+        if wait_time > 0.3:  # Логируем только если ждали больше 100мс
             print(f'{Logger.BLUE}[LOCK] Waiting {wait_time:.3f}s for {lock_name}{thread_info}{Logger.END}')
 
 # Глобальный словарь для отслеживания статистики locks

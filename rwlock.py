@@ -1,12 +1,13 @@
 import threading
+from logger import timed_lock
 
 class RWLock:
     """ Non-reentrant write-preferring rwlock. """
     DEBUG = 1
 
-    def __init__(self):
+    def __init__(self, name):
         self.lock = threading.Lock()
-
+        self.name = name
         self.active_writer_lock = threading.Lock()
         # The total number of writers including the active writer and
         # those blocking on active_writer_lock or readers_finished_cond.
@@ -29,6 +30,11 @@ class RWLock:
                 return self.rwlock
             def __exit__(self, type, value, tb):
                 self.rwlock.release_read()
+            def acquire(self):
+                return self.__enter__()
+            def release(self):
+                return self.__exit__(None, None, None)
+
         # support for the with statement
         self.read_access = _ReadAccess(self)
 
@@ -40,6 +46,11 @@ class RWLock:
                 return self.rwlock
             def __exit__(self, type, value, tb):
                 self.rwlock.release_write()
+            def acquire(self):
+                return self.__enter__()
+            def release(self):
+                return self.__exit__(None, None, None)
+
         # support for the with statement
         self.write_access = _WriteAccess(self)
 
@@ -48,6 +59,7 @@ class RWLock:
             self.active_writer = None
 
     def acquire_read(self):
+        # with timed_lock(self.lock, self.name + "_read"):
         with self.lock:
             if self.DEBUG:
                 me = threading.currentThread()
@@ -67,6 +79,7 @@ class RWLock:
             self.active_reader_count += 1
 
     def release_read(self):
+        # with timed_lock(self.lock, self.name + "_read"):
         with self.lock:
             if self.DEBUG:
                 me = threading.currentThread()
@@ -78,6 +91,7 @@ class RWLock:
                 self.readers_finished_cond.notifyAll()
 
     def acquire_write(self):
+        # with timed_lock(self.lock, self.name + "_write"):
         with self.lock:
             if self.DEBUG:
                 me = threading.currentThread()
@@ -96,6 +110,7 @@ class RWLock:
     def release_write(self):
         if not self.DEBUG:
             self.active_writer_lock.release()
+        # with timed_lock(self.lock, self.name + "_read"):
         with self.lock:
             if self.DEBUG:
                 me = threading.currentThread()
@@ -108,5 +123,6 @@ class RWLock:
                 self.writers_finished_cond.notifyAll()
 
     def get_state(self):
+        # with timed_lock(self.lock, self.name):
         with self.lock:
             return (self.writer_count, self.waiting_reader_count, self.active_reader_count)

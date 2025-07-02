@@ -2,16 +2,24 @@ from Messages import keep_alive
 from peer import Peer
 from tracker import Tracker
 from PeerManager import PeerManager
-from BlockandPiece import Piece, BLOCK_SIZE, BlockStatus
+from BlockandPiece import BLOCK_SIZE, BlockStatus
 import threading
 import time
+from datetime import datetime
 import sys
 import os
+import random
 from logger import Logger, timed_lock, print_lock_stats
+
+def main_log(msg, number):
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        log_entry = f'[{timestamp}] {msg}\n'
+        with open(os.path.join('logs', f"main{number}.log"), 'a', encoding='utf-8') as f:
+            f.write(log_entry)
 
 class Bittorrent:
     def __init__(self) -> None:
-        self.max_concurrent_blocks = 50
+        self.max_concurrent_blocks = 150
         self.semaphore = threading.Semaphore(self.max_concurrent_blocks)
         self._progress_thread = None
         self._monitor_thread = None
@@ -85,7 +93,7 @@ class Bittorrent:
             i = 0
             # print("append start")
             for piece_i, peers in min_heap:
-                if i >= 150:
+                if i >= self.max_concurrent_blocks:
                     break
                 if not peers:
                     Logger.info("No peers available. Retrying...")
@@ -117,7 +125,6 @@ class Bittorrent:
             Logger.error(f"Error in _download_rarest_first: {e}")
 
     def _request_piece_from_peers(self, piece_index, peers: list[Peer]):
-        print(f"_request_piece_from_peers for {piece_index}")
         try:
             if not peers:
                 return
@@ -155,7 +162,6 @@ class Bittorrent:
 
     def _request_blocks(self, peer: Peer, piece_index, max_blocks=16):
         try:
-            print(f"_request_blocks for {piece_index}")
             for block_index in range(min(max_blocks, self.peer_manager.piece_manager.get_blocks_len(piece_index))):
                 # Get piece safely to check block status
                 piece_safe = self.peer_manager.piece_manager.get_piece_safe(piece_index)
@@ -206,7 +212,6 @@ class Bittorrent:
                         # Безопасная отправка данных через сокет
                         try:
                             # Используем новый метод для безопасной отправки
-                            print(f"send req for {piece_index}")
                             if not peer.send_data(request_block):
                                 raise Exception("Failed to send data to peer")
                             
@@ -214,7 +219,7 @@ class Bittorrent:
                             self.peer_manager.piece_manager.update_block_status_safe(
                                 piece_index, block_index, BlockStatus.REQUESTED,
                                 last_requested=time.time()
-                            )
+                            )                            
                         except Exception as sock_error:
                             peer.pending_requests = max(0, peer.pending_requests - 1)
                             self.peer_manager.piece_manager.update_block_status_safe(
@@ -222,24 +227,25 @@ class Bittorrent:
                             )
                             Logger.error(f"Socket error for {peer.ip_port}: {sock_error}")
                             try:
-                                if self.peer_manager.is_peer_in_connected_peers(peer):
+                                if self.peer_manager.is_peer_connected(peer):
                                     self.peer_manager._remove_connected_peer(peer)
                             except Exception as e:
                                 Logger.error(f"Error removing peer after socket error: {e}")
                             break
-
+                        
                         # Префетч следующих блоков
                         try:
                             self.peer_manager.prefetch_next_blocks(peer.sock, piece_index, block_index, peer)
                         except Exception as e:
                             Logger.error(f"Error prefetching next blocks: {e}")
+                        
 
                 except Exception as e:
                     self.peer_manager.piece_manager.update_block_status_safe(
                         piece_index, block_index, BlockStatus.EMPTY
                     )
                     try:
-                        if self.peer_manager.is_peer_in_connected_peers(peer):
+                        if self.peer_manager.is_peer_connected(peer):
                             self.peer_manager._remove_connected_peer(peer)
                     except Exception as remove_error:
                         Logger.error(f"Error removing peer after exception: {remove_error}")

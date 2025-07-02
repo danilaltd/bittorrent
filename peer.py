@@ -27,345 +27,345 @@ def peer_log(msg):
 class Peer:
     def __init__(self, ip_port, number_of_pieces):
         self._sock = None
-        self._sock_lock = RWLock()
+        self._sock_lock = RWLock("_sock_lock")
         self._bit_field = bitstring.BitArray(RoundUp(number_of_pieces))
-        self._bit_field_lock = RWLock()
+        self._bit_field_lock = RWLock("_bit_field_lock")
         self._got_bit_field = False
-        self._got_bit_field_lock = RWLock()
+        self._got_bit_field_lock = RWLock("_got_bit_field_lock")
         self._ip_port = ip_port
-        self._ip_port_lock = RWLock()
+        self._ip_port_lock = RWLock("_ip_port_lock")
         self._ip = ip_port[0]
-        self._ip_lock = RWLock()
+        self._ip_lock = RWLock("_ip_lock")
         self._port = ip_port[1]
-        self._port_lock = RWLock()
+        self._port_lock = RWLock("_port_lock")
         self._am_choking = 1
-        self._am_choking_lock = RWLock()
+        self._am_choking_lock = RWLock("_am_choking_lock")
         self._am_interested = 0
-        self._am_interested_lock = RWLock()
+        self._am_interested_lock = RWLock("_am_interested_lock")
         self._peer_choking = 1
-        self._peer_choking_lock = RWLock()
+        self._peer_choking_lock = RWLock("_peer_choking_lock")
         self._peer_interested = 0
-        self._peer_interested_lock = RWLock()
+        self._peer_interested_lock = RWLock("_peer_interested_lock")
         self._connection_time = None
-        self._connection_time_lock = RWLock()
+        self._connection_time_lock = RWLock("_connection_time_lock")
         self._last_transmission = None
-        self._last_transmission_lock = RWLock()
+        self._last_transmission_lock = RWLock("_last_transmission_lock")
         self._rate = None
-        self._rate_lock = RWLock()
+        self._rate_lock = RWLock("_rate_lock")
         self._uploaded = 0
-        self._uploaded_lock = RWLock()
+        self._uploaded_lock = RWLock("_uploaded_lock")
         self._blocks_recieved = 0
-        self._blocks_recieved_lock = RWLock()
+        self._blocks_recieved_lock = RWLock("_blocks_recieved_lock")
         self._connection_attempts = 0
-        self._connection_attempts_lock = RWLock()
+        self._connection_attempts_lock = RWLock("_connection_attempts_lock")
         self._max_connection_attempts = 3
-        self._max_connection_attempts_lock = RWLock()
+        self._max_connection_attempts_lock = RWLock("_max_connection_attempts_lock")
         self._connection_timeout = 10
-        self._connection_timeout_lock = RWLock()
+        self._connection_timeout_lock = RWLock("_connection_timeout_lock")
         self._last_connection_attempt = 0
-        self._last_connection_attempt_lock = RWLock()
+        self._last_connection_attempt_lock = RWLock("_last_connection_attempt_lock")
         self._connection_cooldown = 5
-        self._connection_cooldown_lock = RWLock()
+        self._connection_cooldown_lock = RWLock("_connection_cooldown_lock")
         self._connected = False
-        self._connected_lock = RWLock()
+        self._connected_lock = RWLock("_connected_lock")
         self._handshake_sent = False
-        self._handshake_sent_lock = RWLock()
+        self._handshake_sent_lock = RWLock("_handshake_sent_lock")
         self._handshake_received = False
-        self._handshake_received_lock = RWLock()
+        self._handshake_received_lock = RWLock("_handshake_received_lock")
         self._last_keepalive = time.time()
-        self._last_keepalive_lock = RWLock()
+        self._last_keepalive_lock = RWLock("_last_keepalive_lock")
         self._keepalive_interval = 60
-        self._keepalive_interval_lock = RWLock()
+        self._keepalive_interval_lock = RWLock("_keepalive_interval_lock")
         self._last_activity = time.time()
-        self._last_activity_lock = RWLock()
+        self._last_activity_lock = RWLock("_last_activity_lock")
         self._inactivity_timeout = 180
-        self._inactivity_timeout_lock = RWLock()
+        self._inactivity_timeout_lock = RWLock("_inactivity_timeout_lock")
         self._requests_sent = 0
-        self._requests_sent_lock = RWLock()
+        self._requests_sent_lock = RWLock("_requests_sent_lock")
         self._pending_requests = 0
-        self._pending_requests_lock = RWLock()
+        self._pending_requests_lock = RWLock("_pending_requests_lock")
         self._last_request_time = time.time()
-        self._last_request_time_lock = RWLock()
+        self._last_request_time_lock = RWLock("_last_request_time_lock")
         self._bad_peer = False
-        self._bad_peer_lock = RWLock()
+        self._bad_peer_lock = RWLock("_bad_peer_lock")
 
     @property
     def sock(self):
-        with self._sock_lock.read_access:
+        with timed_lock(self._sock_lock.read_access, "_sock_lock.read_access"):
             return self._sock
     @sock.setter
     def sock(self, value):
-        with self._sock_lock.write_access:
+        with timed_lock(self._sock_lock.write_access, "_sock_lock.write_access"):
             self._sock = value
 
     @property
     def bit_field(self):
-        with self._bit_field_lock.read_access:
+        with timed_lock(self._bit_field_lock.read_access, "_bit_field_lock.read_access"):
             return self._bit_field
     @bit_field.setter
     def bit_field(self, value):
-        with self._bit_field_lock.write_access:
+        with timed_lock(self._bit_field_lock.write_access, "_bit_field_lock.write_access"):
             self._bit_field = value
 
     @property
     def got_bit_field(self):
-        with self._got_bit_field_lock.read_access:
+        with timed_lock(self._got_bit_field_lock.read_access, "_got_bit_field_lock.read_access"):
             return self._got_bit_field
     @got_bit_field.setter
     def got_bit_field(self, value):
-        with self._got_bit_field_lock.write_access:
+        with timed_lock(self._got_bit_field_lock.write_access, "_got_bit_field_lock.write_access"):
             self._got_bit_field = value
 
     @property
     def ip_port(self):
-        with self._ip_port_lock.read_access:
+        with timed_lock(self._ip_port_lock.read_access, "_ip_port_lock.read_access"):
             return self._ip_port
     @ip_port.setter
     def ip_port(self, value):
-        with self._ip_port_lock.write_access:
+        with timed_lock(self._ip_port_lock.write_access, "_ip_port_lock.write_access"):
             self._ip_port = value
 
     @property
     def ip(self):
-        with self._ip_lock.read_access:
+        with timed_lock(self._ip_lock.read_access, "_ip_lock.read_access"):
             return self._ip
     @ip.setter
     def ip(self, value):
-        with self._ip_lock.write_access:
+        with timed_lock(self._ip_lock.write_access, "_ip_lock.write_access"):
             self._ip = value
 
     @property
     def port(self):
-        with self._port_lock.read_access:
+        with timed_lock(self._port_lock.read_access, "_port_lock.read_access"):
             return self._port
     @port.setter
     def port(self, value):
-        with self._port_lock.write_access:
+        with timed_lock(self._port_lock.write_access, "_port_lock.write_access"):
             self._port = value
 
     @property
     def am_choking(self):
-        with self._am_choking_lock.read_access:
+        with timed_lock(self._am_choking_lock.read_access, "_am_choking_lock.read_access"):
             return self._am_choking
     @am_choking.setter
     def am_choking(self, value):
-        with self._am_choking_lock.write_access:
+        with timed_lock(self._am_choking_lock.write_access, "_am_choking_lock.write_access"):
             self._am_choking = value
 
     @property
     def am_interested(self):
-        with self._am_interested_lock.read_access:
+        with timed_lock(self._am_interested_lock.read_access, "_am_interested_lock.read_access"):
             return self._am_interested
     @am_interested.setter
     def am_interested(self, value):
-        with self._am_interested_lock.write_access:
+        with timed_lock(self._am_interested_lock.write_access, "_am_interested_lock.write_access"):
             self._am_interested = value
 
     @property
     def peer_choking(self):
-        with self._peer_choking_lock.read_access:
+        with timed_lock(self._peer_choking_lock.read_access, "_peer_choking_lock.read_access"):
             return self._peer_choking
     @peer_choking.setter
     def peer_choking(self, value):
-        with self._peer_choking_lock.write_access:
+        with timed_lock(self._peer_choking_lock.write_access, "_peer_choking_lock.write_access"):
             self._peer_choking = value
 
     @property
     def peer_interested(self):
-        with self._peer_interested_lock.read_access:
+        with timed_lock(self._peer_interested_lock.read_access, "_peer_interested_lock.read_access"):
             return self._peer_interested
     @peer_interested.setter
     def peer_interested(self, value):
-        with self._peer_interested_lock.write_access:
+        with timed_lock(self._peer_interested_lock.write_access, "_peer_interested_lock.write_access"):
             self._peer_interested = value
 
     @property
     def connection_time(self):
-        with self._connection_time_lock.read_access:
+        with timed_lock(self._connection_time_lock.read_access, "_connection_time_lock.read_access"):
             return self._connection_time
     @connection_time.setter
     def connection_time(self, value):
-        with self._connection_time_lock.write_access:
+        with timed_lock(self._connection_time_lock.write_access, "_connection_time_lock.write_access"):
             self._connection_time = value
 
     @property
     def last_transmission(self):
-        with self._last_transmission_lock.read_access:
+        with timed_lock(self._last_transmission_lock.read_access, "_last_transmission_lock.read_access"):
             return self._last_transmission
     @last_transmission.setter
     def last_transmission(self, value):
-        with self._last_transmission_lock.write_access:
+        with timed_lock(self._last_transmission_lock.write_access, "_last_transmission_lock.write_access"):
             self._last_transmission = value
 
     @property
     def rate(self):
-        with self._rate_lock.read_access:
+        with timed_lock(self._rate_lock.read_access, "_rate_lock.read_access"):
             return self._rate
     @rate.setter
     def rate(self, value):
-        with self._rate_lock.write_access:
+        with timed_lock(self._rate_lock.write_access, "_rate_lock.write_access"):
             self._rate = value
 
     @property
     def uploaded(self):
-        with self._uploaded_lock.read_access:
+        with timed_lock(self._uploaded_lock.read_access, "_uploaded_lock.read_access"):
             return self._uploaded
     @uploaded.setter
     def uploaded(self, value):
-        with self._uploaded_lock.write_access:
+        with timed_lock(self._uploaded_lock.write_access, "_uploaded_lock.write_access"):
             self._uploaded = value
 
     @property
     def blocks_recieved(self):
-        with self._blocks_recieved_lock.read_access:
+        with timed_lock(self._blocks_recieved_lock.read_access, "_blocks_recieved_lock.read_access"):
             return self._blocks_recieved
     @blocks_recieved.setter
     def blocks_recieved(self, value):
-        with self._blocks_recieved_lock.write_access:
+        with timed_lock(self._blocks_recieved_lock.write_access, "_blocks_recieved_lock.write_access"):
             self._blocks_recieved = value
 
     @property
     def connection_attempts(self):
-        with self._connection_attempts_lock.read_access:
+        with timed_lock(self._connection_attempts_lock.read_access, "_connection_attempts_lock.read_access"):
             return self._connection_attempts
     @connection_attempts.setter
     def connection_attempts(self, value):
-        with self._connection_attempts_lock.write_access:
+        with timed_lock(self._connection_attempts_lock.write_access, "_connection_attempts_lock.write_access"):
             self._connection_attempts = value
 
     @property
     def max_connection_attempts(self):
-        with self._max_connection_attempts_lock.read_access:
+        with timed_lock(self._max_connection_attempts_lock.read_access, "_max_connection_attempts_lock.read_access"):
             return self._max_connection_attempts
     @max_connection_attempts.setter
     def max_connection_attempts(self, value):
-        with self._max_connection_attempts_lock.write_access:
+        with timed_lock(self._max_connection_attempts_lock.write_access, "_max_connection_attempts_lock.write_access"):
             self._max_connection_attempts = value
 
     @property
     def connection_timeout(self):
-        with self._connection_timeout_lock.read_access:
+        with timed_lock(self._connection_timeout_lock.read_access, "_connection_timeout_lock.read_access"):
             return self._connection_timeout
     @connection_timeout.setter
     def connection_timeout(self, value):
-        with self._connection_timeout_lock.write_access:
+        with timed_lock(self._connection_timeout_lock.write_access, "_connection_timeout_lock.write_access"):
             self._connection_timeout = value
 
     @property
     def last_connection_attempt(self):
-        with self._last_connection_attempt_lock.read_access:
+        with timed_lock(self._last_connection_attempt_lock.read_access, "_last_connection_attempt_lock.read_access"):
             return self._last_connection_attempt
     @last_connection_attempt.setter
     def last_connection_attempt(self, value):
-        with self._last_connection_attempt_lock.write_access:
+        with timed_lock(self._last_connection_attempt_lock.write_access, "_last_connection_attempt_lock.write_access"):
             self._last_connection_attempt = value
 
     @property
     def connection_cooldown(self):
-        with self._connection_cooldown_lock.read_access:
+        with timed_lock(self._connection_cooldown_lock.read_access, "_connection_cooldown_lock.read_access"):
             return self._connection_cooldown
     @connection_cooldown.setter
     def connection_cooldown(self, value):
-        with self._connection_cooldown_lock.write_access:
+        with timed_lock(self._connection_cooldown_lock.write_access, "_connection_cooldown_lock.write_access"):
             self._connection_cooldown = value
 
     @property
     def connected(self):
-        with self._connected_lock.read_access:
+        with timed_lock(self._connected_lock.read_access, "_connected_lock.read_access"):
             return self._connected
     @connected.setter
     def connected(self, value):
-        with self._connected_lock.write_access:
+        with timed_lock(self._connected_lock.write_access, "_connected_lock.write_access"):
             self._connected = value
 
     @property
     def handshake_sent(self):
-        with self._handshake_sent_lock.read_access:
+        with timed_lock(self._handshake_sent_lock.read_access, "_handshake_sent_lock.read_access"):
             return self._handshake_sent
     @handshake_sent.setter
     def handshake_sent(self, value):
-        with self._handshake_sent_lock.write_access:
+        with timed_lock(self._handshake_sent_lock.write_access, "_handshake_sent_lock.write_access"):
             self._handshake_sent = value
 
     @property
     def handshake_received(self):
-        with self._handshake_received_lock.read_access:
+        with timed_lock(self._handshake_received_lock.read_access, "_handshake_received_lock.read_access"):
             return self._handshake_received
     @handshake_received.setter
     def handshake_received(self, value):
-        with self._handshake_received_lock.write_access:
+        with timed_lock(self._handshake_received_lock.write_access, "_handshake_received_lock.write_access"):
             self._handshake_received = value
 
     @property
     def last_keepalive(self):
-        with self._last_keepalive_lock.read_access:
+        with timed_lock(self._last_keepalive_lock.read_access, "_last_keepalive_lock.read_access"):
             return self._last_keepalive
     @last_keepalive.setter
     def last_keepalive(self, value):
-        with self._last_keepalive_lock.write_access:
+        with timed_lock(self._last_keepalive_lock.write_access, "_last_keepalive_lock.write_access"):
             self._last_keepalive = value
 
     @property
     def keepalive_interval(self):
-        with self._keepalive_interval_lock.read_access:
+        with timed_lock(self._keepalive_interval_lock.read_access, "_keepalive_interval_lock.read_access"):
             return self._keepalive_interval
     @keepalive_interval.setter
     def keepalive_interval(self, value):
-        with self._keepalive_interval_lock.write_access:
+        with timed_lock(self._keepalive_interval_lock.write_access, "_keepalive_interval_lock.write_access"):
             self._keepalive_interval = value
 
     @property
     def last_activity(self):
-        with self._last_activity_lock.read_access:
+        with timed_lock(self._last_activity_lock.read_access, "_last_activity_lock.read_access"):
             return self._last_activity
     @last_activity.setter
     def last_activity(self, value):
-        with self._last_activity_lock.write_access:
+        with timed_lock(self._last_activity_lock.write_access, "_last_activity_lock.write_access"):
             self._last_activity = value
 
     @property
     def inactivity_timeout(self):
-        with self._inactivity_timeout_lock.read_access:
+        with timed_lock(self._inactivity_timeout_lock.read_access, "_inactivity_timeout_lock.read_access"):
             return self._inactivity_timeout
     @inactivity_timeout.setter
     def inactivity_timeout(self, value):
-        with self._inactivity_timeout_lock.write_access:
+        with timed_lock(self._inactivity_timeout_lock.write_access, "_inactivity_timeout_lock.write_access"):
             self._inactivity_timeout = value
 
     @property
     def requests_sent(self):
-        with self._requests_sent_lock.read_access:
+        with timed_lock(self._requests_sent_lock.read_access, "_requests_sent_lock.read_access"):
             return self._requests_sent
     @requests_sent.setter
     def requests_sent(self, value):
-        with self._requests_sent_lock.write_access:
+        with timed_lock(self._requests_sent_lock.write_access, "_requests_sent_lock.write_access"):
             self._requests_sent = value
 
     @property
     def pending_requests(self):
-        with self._pending_requests_lock.read_access:
+        with timed_lock(self._pending_requests_lock.read_access, "_pending_requests_lock.read_access"):
             return self._pending_requests
     @pending_requests.setter
     def pending_requests(self, value):
-        with self._pending_requests_lock.write_access:
+        with timed_lock(self._pending_requests_lock.write_access, "_pending_requests_lock.write_access"):
             self._pending_requests = value
 
     @property
     def last_request_time(self):
-        with self._last_request_time_lock.read_access:
+        with timed_lock(self._last_request_time_lock.read_access, "_last_request_time_lock.read_access"):
             return self._last_request_time
     @last_request_time.setter
     def last_request_time(self, value):
-        with self._last_request_time_lock.write_access:
+        with timed_lock(self._last_request_time_lock.write_access, "_last_request_time_lock.write_access"):
             self._last_request_time = value
 
     @property
     def bad_peer(self):
-        with self._bad_peer_lock.read_access:
+        with timed_lock(self._bad_peer_lock.read_access, "_bad_peer_lock.read_access"):
             return self._bad_peer
     @bad_peer.setter
     def bad_peer(self, value):
-        with self._bad_peer_lock.write_access:
+        with timed_lock(self._bad_peer_lock.write_access, "_bad_peer_lock.write_access"):
             self._bad_peer = value
 
     def is_socket_valid(self):

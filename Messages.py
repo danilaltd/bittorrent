@@ -1,6 +1,5 @@
 import struct
 from bitstring import *
-from BlockandPiece import Piece
 class keep_alive:
     # keep-alive: <len=0000>
     length = 0
