@@ -33,7 +33,7 @@ def log_error(msg, exc=None):
 class Tracker:
     def __init__(self, torrent_path, file_path):
         self.torrent_obj = Torrent(torrent_path, file_path) 
-        self.peers = set()
+        self.peers: set[tuple [str, str]] = set()
         self.tracker_threads = []
         self.tracker_update_thread = None
         self.downloaded = 0
@@ -155,7 +155,8 @@ class Tracker:
                     log_error(f"Unknown peer format from {tracker_url}")
                     return
                     
-                log_info(f"Successfully got {len(self.peers)} peers from {tracker_url}")
+                with timed_lock(self.peers_lock, "peers_lock"):
+                    log_info(f"Successfully got {len(self.peers)} peers from {tracker_url}")
                 return  # Success, exit the function
             except requests.exceptions.ConnectionError as e:
                 log_error(f"Connection error for {tracker_url} (attempt {attempt + 1}/{max_retries})", e)

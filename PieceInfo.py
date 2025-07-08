@@ -271,8 +271,8 @@ class PieceInfo:
         if peers is not None:
             out += self._peer_stats_string_internal(peers)   
         
-        # if print_matrix and matrix_data:
-            # out += self._matrix_string_internal(matrix_data)
+        if print_matrix and matrix_data:
+            out += self._matrix_string_internal(matrix_data)
         
         try:
             os.makedirs('logs', exist_ok=True)
@@ -386,10 +386,11 @@ class PieceInfo:
                 sign = '+' if active else '-'
                 if active:
                     active_peers += 1
-                table += f'  {sign} {peer_id}: {available} pieces; Blocks recieved: {peer.blocks_recieved}; Connections: {peer.requests_sent}; Pending: {peer.pending_requests}\n'
+                table += f'  {sign} {peer_id}: {available} pieces; Blocks recieved: {peer.blocks_recieved}; Connections: {peer.requests_sent}; Pending: {peer.pending_requests}; Bad: {peer.bad_peer}\n'
         except Exception as e:
             res += f'\n[Peer stats error: {e}]\n'
             res += f'Traceback:\n{traceback.format_exc()}'
+            print(f'\n[Peer stats error: {e}]\nTraceback:\n{traceback.format_exc()}')
 
         res += f' (active: {active_peers})\n'
         res += table
@@ -517,8 +518,8 @@ class PieceInfo:
         return len(self.downloaded_pieces) == self.number_of_pieces
 
     def print_progress_bar_safe(self, iteration, total, suffix='Complete', decimals=1, print_matrix=False, peers=None):
-        # matrix_copy = self._get_pieces_matrix_safe()
-        matrix_copy = None
+        matrix_copy = self._get_pieces_matrix_safe()
+        # matrix_copy = None
         self._print_progress_bar_internal(iteration, total, suffix, decimals, print_matrix, peers, matrix_copy)
 
     def update_block_status_safe(self, piece_index, block_index, status: Status, data=None, last_requested=None):

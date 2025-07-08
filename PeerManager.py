@@ -76,6 +76,8 @@ class PeerManager:
         self._tracker_obj_lock = RWLock("_tracker_obj_lock")
         self._peers: list[Peer] = []
         self._peers_lock = RWLock("_peers_lock")
+        self._peers_ip_port: list[tuple[str, str]] = []
+        self._peers_ip_port_lock = RWLock("_peers_ip_port_lock")
         self._connected_peers: list[Peer] = []
         self._connected_peers_lock = RWLock("_connected_peers_lock")
         self._threads = {}
@@ -130,6 +132,15 @@ class PeerManager:
     def peers(self, value):
         with timed_lock(self._peers_lock.write_access, "_peers_lock.write_access"):
             self._peers = value
+            
+    @property
+    def peers_ip_port(self):
+        with timed_lock(self._peers_ip_port_lock.read_access, "_peers_ip_port_lock.read_access"):
+            return self._peers_ip_port
+    @peers_ip_port.setter
+    def peers_ip_port(self, value):
+        with timed_lock(self._peers_ip_port_lock.write_access, "_peers_ip_port_lock.write_access"):
+            self._peers_ip_port = value
 
     @property
     def connected_peers(self):
@@ -272,17 +283,31 @@ class PeerManager:
         with timed_lock(self._download_started_lock.write_access, "_download_started_lock.write_access"):
             self._download_started = value
 
-    def _is_peer_in_peers(self, peer):
+    def _is_peer_in_peers(self, peer: Peer):
         with timed_lock(self._peers_lock.read_access, "_peers_lock.read_access"):
             return peer in self._peers
     
-    def _add_peer(self, peer):
+    def _add_peer(self, peer: Peer):
         with timed_lock(self._peers_lock.write_access, "_peers_lock.write_access"):
             self._peers.append(peer)
             
     def _clear_peers(self):
         with timed_lock(self._peers_lock.write_access, "_peers_lock.write_access"):
             self._peers.clear()
+            
+    def _is_peer_in_peers_ip_port(self, peer: tuple[str, str]):
+        with timed_lock(self._peers_ip_port_lock.read_access, "_peers_ip_port.read_access"):
+            return peer in self._peers_ip_port
+    
+    def _add_peer_ip_port(self, peer: tuple[str, str]):
+        with timed_lock(self._peers_ip_port_lock.write_access, "_peers_ip_port.write_access"):
+            self._peers_ip_port.append(peer)
+            
+    def _clear_peers_ip_port(self):
+        with timed_lock(self._peers_ip_port_lock.write_access, "_peers_ip_port.write_access"):
+            self._peers_ip_port.clear()
+            
+            
             
     def _clear_threads(self):
         with timed_lock(self._threads_lock.write_access, "_threads_lock.write_access"):
@@ -361,11 +386,12 @@ class PeerManager:
             self.last_peer_update = current_time
             with timed_lock(self._tracker_obj.peers_lock, "_tracker_obj.peers_lock"):
                 peers_copy = self._tracker_obj.peers.copy()
-            for peer in peers_copy:
-                if peer not in self._peers:
-                    peer = Peer(peer, self._number_of_pieces)
-                    self._add_peer(peer)
-                    self.launch_thread(peer)
+            for peer_ip_port in peers_copy:
+                if not self._is_peer_in_peers_ip_port(peer_ip_port):
+                    self._add_peer_ip_port(peer_ip_port)
+                    peerObj = Peer(peer_ip_port, self._number_of_pieces)
+                    self._add_peer(peerObj)
+                    self.launch_thread(peerObj)
         except Exception as e:
             log_error("Error updating peer list", e)
             self.peer_update_interval = min(60, self.peer_update_interval * 1.5)
@@ -383,7 +409,7 @@ class PeerManager:
                     if self._get_connected_peers_count() >= MAX_CONNECTED_PEER:
                         break
                     try:
-                        if (peer in self.threads and self.threads[peer].is_alive()) or peer.bad_peer:
+                        if (peer in self.threads and self.threads[peer].is_alive()) or peer.bad_peer or peer.connecting:
                             continue
                         self.launch_thread(peer)
                     except Exception as e:
@@ -406,6 +432,7 @@ class PeerManager:
                 pass
             self._clear_connected_peers()
         self._clear_peers()
+        self._clear_peers_ip_port()
         self._clear_threads()
 
     def read_continously_from_sock(self, peer: Peer):
@@ -637,7 +664,7 @@ class PeerManager:
                 buff = peer.sock.recv(min(required, 65536))  # Increased buffer size to 64KB
                 end = time.time()
                 
-                if len(buff) > 0:
+                if buff and len(buff) > 0:
                     peer.rate = len(buff) // 125
                     peer.rate = peer.rate // (end - start) if (end - start) > 0 else 0
                     data += buff
@@ -669,7 +696,7 @@ class PeerManager:
         if peer.connection_attempts >= peer.max_connection_attempts:
             log_info(f"Max connection attempts reached for {peer.ip_port}")
             return
-
+        peer.connecting = True
         sock = None
         try:
             # Validate peer address before connecting
@@ -688,31 +715,29 @@ class PeerManager:
             handshake = Handshake(self.tracker_obj.torrent_obj.peer_id, self.tracker_obj.torrent_obj.info_hash)
             handshake_success = False
             
-            for attempt in range(3):  # Try handshake up to 3 times
+            handshake_bytes = handshake.getHandshakeBytes()
+            max_retries = 3
+            for attempt in range(max_retries):  # Try handshake up to 3 times
                 try:
-                    handshake_bytes = handshake.getHandshakeBytes()
                     peer.send_data(handshake_bytes)
                     peer.handshake_sent = True
                     
                     # Read handshake response with retry
                     data = None
-                    max_retries = 3
-                    for retry in range(max_retries):
-                        try:
-                            data = self._read_bytes_from_sock(68, peer)
-                            if data:
-                                break
-                            time.sleep(1 * (retry + 1))
-                        except socket.timeout:
-                            if retry == max_retries - 1:  # Last retry
-                                log_error(f"Handshake timeout for {peer.ip_port} after {retry + 1} attempts")
-                                break
-                            continue
-                        except Exception as e:
-                            log_error(f"Error receiving handshake from {peer.ip_port}", e)
-                            break
+                    try:
+                        data = self._read_bytes_from_sock(68, peer)
+                        if not data:
+                            raise Exception
+                    except socket.timeout:
+                        log_error(f"Handshake timeout for {peer.ip_port} after {attempt + 1} attempts")
+                        time.sleep(1)
+                        continue
+                    except Exception as e:
+                        log_error(f"Error receiving handshake from {peer.ip_port} after {attempt + 1} attempts", e)
+                        time.sleep(1)
+                        continue
                     
-                    if data and len(data) == 68:
+                    if len(data) == 68:
                         # Verify handshake response
                         if data[0] != 19 or data[1:20] != b'BitTorrent protocol':
                             log_error(f"Invalid handshake protocol from {peer.ip_port}")
@@ -733,31 +758,34 @@ class PeerManager:
                     if attempt == 2:  # Last attempt
                         log_error(f"Handshake timeout for {peer.ip_port}")
                         return
-                    time.sleep(2 * (attempt + 1))
+                    time.sleep(1)
                     continue
                 except Exception as e:
                     if attempt == 2:  # Last attempt
                         log_error(f"Handshake error for {peer.ip_port}", e)
                         return
-                    time.sleep(2 * (attempt + 1))
+                    time.sleep(1)
                     continue
             
             if not handshake_success:
+                peer.bad_peer = True
                 return
                 
             # Add peer to connected list with proper locking
             if not self._is_peer_in_peers(peer):
                 self._add_peer(peer)
+            if not self._is_peer_in_peers_ip_port((peer.ip, peer.port)):
+                self._add_peer_ip_port((peer.ip, peer.port))
             if not self._is_peer_connected(peer):    
                 self._add_connected_peer(peer)
             peer.sock = sock
             
             # Send interested message with retry
             interested_sent = False
-            for attempt in range(3):
+            interested_message = interested().byteStringForInterested()
+            for attempt in range(max_retries):
                 try:
-                    interested_message = interested()
-                    if peer.send_data(interested_message.byteStringForInterested()):
+                    if peer.send_data(interested_message):
                         peer.am_interested = 1
                         peer.last_transmission = time.time()
                         peer.update_activity()
@@ -767,9 +795,10 @@ class PeerManager:
                     if attempt == 2:  # Last attempt
                         log_error(f"Error sending interested message to {peer.ip_port}", e)
                         return
-                    time.sleep(1 * (attempt + 1))
+                    time.sleep(1)
             
             if not interested_sent:
+                peer.bad_peer = True
                 return
                 
             # Start reading thread
@@ -785,6 +814,7 @@ class PeerManager:
             if self._is_peer_connected(peer):
                 self._remove_connected_peer(peer)
         finally:
+            peer.connecting = False
             if sock is not None and not peer.connected:
                 try:
                     sock.shutdown(socket.SHUT_RDWR)

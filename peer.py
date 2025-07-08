@@ -1,9 +1,7 @@
 import socket
-import traceback
 from ipaddress import ip_address, IPv4Address
 import bitstring
 import time
-import threading
 from datetime import datetime
 import os
 from logger import timed_lock
@@ -119,6 +117,8 @@ class Peer:
         self._last_request_time_lock = RWLock("_last_request_time_lock")
         self._bad_peer = False
         self._bad_peer_lock = RWLock("_bad_peer_lock")
+        self._connecting = False
+        self._connecting_lock = RWLock("_connecting_lock")
 
     @property
     def sock(self):
@@ -398,6 +398,15 @@ class Peer:
     def bad_peer(self, value):
         with timed_lock(self._bad_peer_lock.write_access, "_bad_peer_lock.write_access"):
             self._bad_peer = value
+    
+    @property
+    def connecting(self):
+        with timed_lock(self._connecting_lock.read_access, "_connecting_lock.read_access"):
+            return self._connecting
+    @connecting.setter
+    def connecting(self, value):
+        with timed_lock(self._connecting_lock.write_access, "_connecting_lock.write_access"):
+            self._connecting = value
 
     def is_socket_valid(self):
         """Check if socket is valid and connected"""
