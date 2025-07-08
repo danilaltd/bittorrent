@@ -2,7 +2,7 @@ from Messages import keep_alive
 from peer import Peer
 from tracker import Tracker
 from PeerManager import PeerManager
-from BlockandPiece import BLOCK_SIZE, BlockStatus
+from BlockandPiece import BLOCK_SIZE, Status
 import threading
 import time
 from datetime import datetime
@@ -27,6 +27,7 @@ class Bittorrent:
 
     def _clear_logs_directory(self):
         """Очищает содержимое папки logs при запуске"""
+        import shutil
         logs_dir = "logs"
         if os.path.exists(logs_dir):
             try:
@@ -35,6 +36,9 @@ class Bittorrent:
                     if os.path.isfile(file_path):
                         os.remove(file_path)
                         Logger.info(f"Удален лог файл: {filename}")
+                    elif os.path.isdir(file_path):
+                        shutil.rmtree(file_path)
+                        Logger.info(f"Удалена папка с логами: {filename}")
                 Logger.info("Папка logs очищена")
             except Exception as e:
                 Logger.error(f"Ошибка при очистке папки logs: {e}")
@@ -103,6 +107,7 @@ class Bittorrent:
                     continue
                 i+=1
                 try:
+                    
                     thread = threading.Thread(target=self._request_piece_from_peers, args=(piece_i, peers))
                     thread.daemon = True
                     threads.append(thread)
@@ -164,17 +169,13 @@ class Bittorrent:
         try:
             for block_index in range(min(max_blocks, self.peer_manager.piece_manager.get_blocks_len(piece_index))):
                 # Get piece safely to check block status
-                piece_safe = self.peer_manager.piece_manager.get_piece_safe(piece_index)
-                if not piece_safe:
-                    continue
-                    
-                block = piece_safe.blocks[block_index]
-                if block.status != BlockStatus.EMPTY:
+                
+                if not self.peer_manager.piece_manager.is_block_empty(piece_index, block_index):
                     continue
                     
                 # Update block status to REQUESTED safely
                 self.peer_manager.piece_manager.update_block_status_safe(
-                    piece_index, block_index, BlockStatus.REQUESTED
+                    piece_index, block_index, Status.REQUESTED
                 )
                 
                 try:
@@ -182,18 +183,18 @@ class Bittorrent:
                         # Получаем запрос на блок
                         request_block = None
                         try:
-                            request_block = self.peer_manager.request_blockByteString(piece_index, block_index, block)
+                            request_block = self.peer_manager.request_blockByteString(piece_index, block_index, self.peer_manager.piece_manager.get_block_size(piece_index, block_index))
                         except Exception as e:
                             Logger.error(f"Error creating request block: {e}")
                             self.peer_manager.piece_manager.update_block_status_safe(
-                                piece_index, block_index, BlockStatus.EMPTY
+                                piece_index, block_index, Status.EMPTY
                             )
                             break
                         
                         if not request_block:
                             Logger.error(f"Failed to create request block for piece {piece_index}, block {block_index}")
                             self.peer_manager.piece_manager.update_block_status_safe(
-                                piece_index, block_index, BlockStatus.EMPTY
+                                piece_index, block_index, Status.EMPTY
                             )
                             break
                         
@@ -208,7 +209,7 @@ class Bittorrent:
                         peer.requests_sent += 1
                         peer.pending_requests += 1
                         peer.last_request_time = time.time()
-                        
+
                         # Безопасная отправка данных через сокет
                         try:
                             # Используем новый метод для безопасной отправки
@@ -217,13 +218,13 @@ class Bittorrent:
                             
                             # Update last_requested safely (вне блокировки peer)
                             self.peer_manager.piece_manager.update_block_status_safe(
-                                piece_index, block_index, BlockStatus.REQUESTED,
+                                piece_index, block_index, Status.REQUESTED,
                                 last_requested=time.time()
                             )                            
                         except Exception as sock_error:
                             peer.pending_requests = max(0, peer.pending_requests - 1)
                             self.peer_manager.piece_manager.update_block_status_safe(
-                                piece_index, block_index, BlockStatus.EMPTY
+                                piece_index, block_index, Status.EMPTY
                             )
                             Logger.error(f"Socket error for {peer.ip_port}: {sock_error}")
                             try:
@@ -242,7 +243,7 @@ class Bittorrent:
 
                 except Exception as e:
                     self.peer_manager.piece_manager.update_block_status_safe(
-                        piece_index, block_index, BlockStatus.EMPTY
+                        piece_index, block_index, Status.EMPTY
                     )
                     try:
                         if self.peer_manager.is_peer_connected(peer):
@@ -256,7 +257,7 @@ class Bittorrent:
 
     def _update_stats(self):
         try:
-            downloaded, blocks_in_progress = self.peer_manager.piece_manager.download_blocks_safe()
+            downloaded = self.peer_manager.piece_manager.num_of_downloaded_pieces()
             uploaded = sum(peer.uploaded for peer in self.peer_manager.get_connected_peers_for_stats())
             self.tracker.update_stats(downloaded * BLOCK_SIZE, uploaded)
         except Exception as e:
@@ -274,9 +275,9 @@ class Bittorrent:
                 threading.Thread(target=self.tracker.udp_request, args=(url, 'completed')).start()
 
         self.peer_manager.piece_manager.print_progress_bar_safe(
-            self.peer_manager.piece_manager.download_blocks_safe()[0],
+            self.peer_manager.piece_manager.num_of_downloaded_pieces(),
             self.peer_manager.piece_manager.totalBlocks,
-            f"Completed {self.peer_manager.piece_manager.pieces_downloaded_safe()}/{len(self.peer_manager.piece_manager.pieces)}"
+            f"Completed {self.peer_manager.piece_manager.num_of_downloaded_pieces()}/{self.peer_manager.piece_manager.num_of_downloaded_pieces()}/{self.peer_manager.piece_manager.number_of_pieces}"
         )
 
     def _finalize(self):
@@ -292,11 +293,11 @@ class Bittorrent:
 
     def progress_printer(self):
         while not self.peer_manager.piece_manager.all_piece_complete_safe() and self.running:
-            downloaded, blocks_in_progress = self.peer_manager.piece_manager.download_blocks_safe()
+            downloaded = self.peer_manager.piece_manager.num_of_downloaded_pieces()
             self.peer_manager.piece_manager.print_progress_bar_safe(
                 downloaded,
                 self.peer_manager.piece_manager.totalBlocks,
-                f"{self.peer_manager.piece_manager.pieces_downloaded_safe()}/{len(self.peer_manager.piece_manager.pieces)}",
+                f"{self.peer_manager.piece_manager.num_of_downloaded_pieces()}/{self.peer_manager.piece_manager.num_of_requested_pieces()}/{self.peer_manager.piece_manager.number_of_pieces}",
                 print_matrix=True,
                 peers=self.peer_manager.get_peers_for_progress()
             )

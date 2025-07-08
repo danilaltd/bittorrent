@@ -1,5 +1,5 @@
 import socket
-import struct
+import traceback
 from ipaddress import ip_address, IPv4Address
 import bitstring
 import time
@@ -18,11 +18,42 @@ def validIPAddress(IP: str) -> str:
     except ValueError:
         return "Invalid"
     
-def peer_log(msg):
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        log_entry = f'[{timestamp}] {msg}\n'
-        with open(os.path.join('logs', "peer.log"), 'a', encoding='utf-8') as f:
-            f.write(log_entry)
+def log_info(msg, flags = None):
+    if flags is None:
+        flags = []
+    flags.insert(0, f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    log_entry = f'{msg}\n'
+    res = ''
+    for flag in flags:
+        res += f"[{flag}]"
+    res += ' '    
+    res += log_entry    
+    with open(os.path.join('logs', "peer.log"), 'a', encoding='utf-8') as f:
+        f.write(res)
+        
+def log_error(msg, exc=None, flags = None):
+    if flags is None:
+        flags = []
+    flags.insert(0, 'ERROR')
+    flags.insert(0, f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    log_entry = f'[{timestamp}] {msg}\n'
+    if exc is not None:
+        if isinstance(exc, ConnectionResetError) or ('10054' in str(exc)):
+            flags.append('Network')
+            log_entry += f'Пир разорвал соединение (обычно для BitTorrent): {msg} — {exc}'
+        else:
+            log_entry = f'{msg}: {exc}'
+    else:
+        log_entry = f'{msg}'
+    log_entry += '\n'
+    res = ''
+    for flag in flags:
+        res += f"[{flag}]"
+    res += ' '    
+    res += log_entry    
+    with open(os.path.join('logs', "peer.log"), 'a', encoding='utf-8') as f:
+        f.write(res)
 
 class Peer:
     def __init__(self, ip_port, number_of_pieces):
@@ -386,7 +417,7 @@ class Peer:
             # Проверяем, что можем отправить данные
             try:
                 # Используем MSG_DONTWAIT для неблокирующей проверки
-                self.sock.send(b'\x00\x00\x00\x00')
+                self.send_data(b'\x00\x00\x00\x00')
                 return True
             except (socket.error, OSError) as e:
                 print(f"!!!send test failed: {e}")
@@ -409,7 +440,6 @@ class Peer:
             return None
 
         # Получаем блокировку только для обновления состояния
-        # with timed_lock(self._lock, "peer_connection_lock"):
         if current_time - self.last_connection_attempt < self.connection_cooldown:
             return None
         self.last_connection_attempt = current_time
@@ -443,11 +473,11 @@ class Peer:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 131072)  
                 ip_port = (self.ip, self.port)
 
-            peer_log(f"Attempting connection to {ip_port}")
+            log_info(f"Attempting connection to {ip_port}")
             sock.settimeout(self.connection_timeout)
             
             if not (0 < self.port < 65536):
-                peer_log(f"Invalid port number {self.port} for {self.ip}")
+                log_info(f"Invalid port number {self.port} for {self.ip}")
                 sock.close()
                 return None
                 
@@ -457,14 +487,13 @@ class Peer:
             try:
                 sock.getpeername()
             except (socket.error, OSError) as e:
-                peer_log(f"Connection verification failed for {ip_port}: {e}")
+                log_info(f"Connection verification failed for {ip_port}: {e}")
                 sock.close()
                 self.connection_attempts += 1
                 self.connected = False
                 return None
             
             # Обновляем состояние под блокировкой (быстрая операция)
-            # with timed_lock(self._lock, "peer_connection_lock"):
             self.sock = sock
             self.ip_port = ip_port
             self.last_transmission = time.time()
@@ -476,11 +505,11 @@ class Peer:
             self.handshake_sent = False
             self.handshake_received = False
             
-            peer_log("Success")
+            log_info(f"Success {ip_port}")
             return sock
             
         except socket.timeout:
-            peer_log(f"Connection timeout for {ip_port}")
+            log_info(f"Connection timeout for {ip_port}")
             self.connection_attempts += 1
             self.connected = False
             if 'sock' in locals():
@@ -490,7 +519,7 @@ class Peer:
                     pass
             return None
         except ConnectionRefusedError:
-            peer_log(f"Connection refused by {ip_port}")
+            log_info(f"Connection refused by {ip_port}")
             self.connection_attempts += 1
             self.connected = False
             if 'sock' in locals():
@@ -500,7 +529,7 @@ class Peer:
                     pass
             return None
         except Exception as e:
-            peer_log(f"Connection error for {ip_port}: {str(e)}")
+            log_info(f"Connection error for {ip_port}: {str(e)}")
             self.connection_attempts += 1
             self.connected = False
             if 'sock' in locals():
@@ -525,7 +554,6 @@ class Peer:
                 pass
         
         # Обновляем состояние под блокировкой (быстрая операция)
-        # with timed_lock(self._lock, "peer_connection_lock"):
         self.connected = False
         self.handshake_sent = False
         self.handshake_received = False
@@ -544,12 +572,12 @@ class Peer:
                     self.connected = False
                     return False
                     
-                self.sock.send(b'\x00\x00\x00\x00')  # Keepalive message
+                self.send_data(b'\x00\x00\x00\x00')  # Keepalive message
                 self.last_keepalive = current_time
                 self.last_activity = current_time
                 return True
             except (socket.error, OSError, AttributeError) as e:
-                peer_log(f"Keepalive send failed for {self.ip_port}: {e}")
+                log_info(f"Keepalive send failed for {self.ip_port}: {e}")
                 self.connected = False
                 return False
         return True
@@ -569,20 +597,20 @@ class Peer:
         self.last_activity = time.time()
         
     def send_data(self, data):
-        """Безопасная отправка данных с минимальным временем блокировки"""
         if not self.connected or not self.sock:
+            log_error(f"{{self.ip_port}} not self.connected or not self.sock: {self.connected} {self.sock}")
             return False
             
         try:
-            # with timed_lock(self._lock, "peer_connection_lock"):
             if not self.connected or not self.sock:
                 return False
             self.sock.sendall(data)
             self.last_transmission = time.time()
             self.last_activity = time.time()
+            log_info(f"Send data was ok {self.ip_port}")
             return True
         except Exception as e:
-            peer_log(f"Send data failed for {self.ip_port}: {e}")
+            log_error(f"Send data failed for {self.ip_port}: {e}")
             self.connected = False
             return False
         
@@ -604,10 +632,14 @@ class Peer:
         return rate_score + unchoke_bonus - connection_penalty #+ piece_bonus
     
     def is_active(self, needed_pieces: set):
-        return any(self.bit_field[i] for i in needed_pieces if i < len(self.bit_field))
+        bitfield = self.bit_field.copy()
+        length = len(self.bit_field)
+        return any(bitfield[i] for i in needed_pieces if i < length)
     
     def avaliable_pieces(self, needed_pieces: set):
-        return sum(1 for i in needed_pieces if i < len(self.bit_field) and self.bit_field[i])
+        bitfield = self.bit_field.copy()
+        length = len(self.bit_field)
+        return sum(1 for i in needed_pieces if i < length and bitfield[i])
 
     
 

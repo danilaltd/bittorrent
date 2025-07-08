@@ -63,8 +63,8 @@ class RWLock:
         with self.lock:
             if self.DEBUG:
                 me = threading.currentThread()
-                assert me not in self.active_readers, 'This thread has already acquired read access and this lock isn\'t reader-reentrant!'
-                assert me != self.active_writer, 'This thread already has write access, release that before acquiring read access!'
+                assert me not in self.active_readers, f'{self.name}: This thread has already acquired read access and this lock isn\'t reader-reentrant!'
+                assert me != self.active_writer, f'{self.name}: This thread already has write access, release that before acquiring read access!'
                 self.active_readers.add(me)
             if self.writer_count:
                 self.waiting_reader_count += 1
