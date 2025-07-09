@@ -275,9 +275,7 @@ class Bittorrent:
                 threading.Thread(target=self.tracker.udp_request, args=(url, 'completed')).start()
 
         self.peer_manager.piece_manager.print_progress_bar_safe(
-            self.peer_manager.piece_manager.num_of_downloaded_pieces(),
-            self.peer_manager.piece_manager.totalBlocks,
-            f"Completed {self.peer_manager.piece_manager.num_of_downloaded_pieces()}/{self.peer_manager.piece_manager.num_of_downloaded_pieces()}/{self.peer_manager.piece_manager.number_of_pieces}"
+            f"Completed {self.peer_manager.piece_manager.num_of_downloaded_pieces()}/{self.peer_manager.piece_manager.num_of_requested_pieces()}/{self.peer_manager.piece_manager.num_of_empty_pieces()}/{self.peer_manager.piece_manager.number_of_pieces}"
         )
 
     def _finalize(self):
@@ -293,11 +291,8 @@ class Bittorrent:
 
     def progress_printer(self):
         while not self.peer_manager.piece_manager.all_piece_complete_safe() and self.running:
-            downloaded = self.peer_manager.piece_manager.num_of_downloaded_pieces()
             self.peer_manager.piece_manager.print_progress_bar_safe(
-                downloaded,
-                self.peer_manager.piece_manager.totalBlocks,
-                f"{self.peer_manager.piece_manager.num_of_downloaded_pieces()}/{self.peer_manager.piece_manager.num_of_requested_pieces()}/{self.peer_manager.piece_manager.number_of_pieces}",
+                f"{self.peer_manager.piece_manager.num_of_downloaded_pieces()}/{self.peer_manager.piece_manager.num_of_requested_pieces()}/{self.peer_manager.piece_manager.num_of_empty_pieces()}/{self.peer_manager.piece_manager.number_of_pieces}",
                 print_matrix=True,
                 peers=self.peer_manager.get_peers_for_progress()
             )
@@ -308,10 +303,13 @@ class Bittorrent:
         print_lock_stats()
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Usage: python main.py <torrent_file> <download_path>")
-        sys.exit(1)
-    torrent = sys.argv[1]
-    path = sys.argv[2]
+    # if len(sys.argv) != 3:
+        # print("Usage: python main.py <torrent_file> <download_path>")
+        # sys.exit(1)
+    # torrent = sys.argv[1]
+    # path = sys.argv[2]
+
+    torrent = r'.\torrents\music.torrent'
+    path = r"./down"
     b = Bittorrent()
     b.start_downloading(torrent, path)

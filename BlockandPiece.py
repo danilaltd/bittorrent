@@ -66,6 +66,17 @@ class Block:
         elif status == Status.RECEIVED:
             self.status = Status.RECEIVED
         return self.status
+    
+    def changeStatusForce(self, status: Status):
+        if status == Status.EMPTY:
+            if self.status != Status.RECEIVED:
+                self.status = Status.EMPTY
+        elif status == Status.REQUESTED:
+            if self.status != Status.RECEIVED:
+                self.status = Status.REQUESTED
+        elif status == Status.RECEIVED:
+            self.status = Status.RECEIVED
+        return self.status
 class Piece:
     def __init__(self, piece_index, piece_size, piece_sha1):
         self._piece_index = piece_index
@@ -180,32 +191,36 @@ class Piece:
             self._blocks.append(Block(self.piece_size))
             self.empty_blocks.add(1)  
         
-    def changeStatus(self, block_index, status: Status, data=None, last_requested=None) -> Status : 
+    def changeStatus(self, block_index, status: Status, data=None, last_requested=None) -> tuple[Status, int] : 
         if 0 <= block_index < self.number_of_blocks:
             block: Block = self.blocks[block_index]
-            realStatus = block.changeStatus(status)
-            if realStatus == status:
+            real_status = block.changeStatus(status)
+            if real_status == status:
                 if data is not None:
                     block.data = data
                 if last_requested is not None:
                     block.last_requested = last_requested
-            if realStatus == Status.EMPTY:
-                self.empty_blocks.add(block_index)
-                self.downloaded_blocks.discard(block_index)
-                self.requested_blocks.discard(block_index)
-            elif realStatus == Status.REQUESTED:
-                self.empty_blocks.discard(block_index)
-                self.downloaded_blocks.discard(block_index)
-                self.requested_blocks.add(block_index)
-            elif realStatus == Status.RECEIVED:
-                self.empty_blocks.discard(block_index)
-                self.downloaded_blocks.add(block_index)
-                self.requested_blocks.discard(block_index)
-
-            self._update_status()    
-            return self.getStatus()
+            d = len(self.downloaded_blocks)
+            self._fix_sets(real_status, block_index)    
+            return self.getStatus(), len(self.downloaded_blocks) - d
         
         return None
+        
+    def _fix_sets(self, real_status, block_index):
+        if real_status == Status.EMPTY:
+            self.empty_blocks.add(block_index)
+            self.downloaded_blocks.discard(block_index)
+            self.requested_blocks.discard(block_index)
+        elif real_status == Status.REQUESTED:
+            self.empty_blocks.discard(block_index)
+            self.downloaded_blocks.discard(block_index)
+            self.requested_blocks.add(block_index)
+        elif real_status == Status.RECEIVED:
+            self.empty_blocks.discard(block_index)
+            self.downloaded_blocks.add(block_index)
+            self.requested_blocks.discard(block_index)
+
+        self._update_status()    
         
     def _update_status(self):
         if len(self.empty_blocks) == self.number_of_blocks:
@@ -218,12 +233,25 @@ class Piece:
     def getStatus(self):
         return self.cur_status
     
-    def monitor_block_timeouts(self, timeout):
-        for block in self.blocks:
+    def monitor_block_timeouts(self, timeout) -> Status:
+        for block_index, block in enumerate(self.blocks):
             if block.status == Status.REQUESTED and block.last_requested:
                 if time.time() - block.last_requested > timeout:
-                    block.changeStatus(Status.EMPTY)
+                    real_status = block.changeStatusForce(Status.EMPTY)
                     block.last_requested = None
+                    self._fix_sets(real_status, block_index)    
+            else:
+                if block.status == Status.REQUESTED:
+                    print(f"not last_requested {self.piece_index}:{block_index}")
+                if block.status == Status.EMPTY:
+                    print(f"empty {self.piece_index}:{block_index}")
+                
+                # else:
+                    # print("not time.time() - block.last_requested > timeout:")     
+            # else:
+                # print("not block.status == Status.REQUESTED and block.last_requested")        
+
+        return self.getStatus()
                     
     def is_block_empty(self, block_index):
         return self.blocks[block_index].status == Status.EMPTY

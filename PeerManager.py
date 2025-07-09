@@ -20,6 +20,11 @@ from logger import timed_lock, lock_decorator, print_lock_stats
 from rwlock import RWLock
 
 MAX_CONNECTED_PEER = 50
+MIN_PEER_UPDATE_INTERVAL = 3
+DEFAULT_PEER_UPDATE_INTERVAL = 30
+MIN_PIECE_UPDATE_INTERVAL = 3
+DEFAULT_PIECE_UPDATE_INTERVAL = 60
+RECONNECT_INTERVAL = 10
 
 def log_error(msg, exc=None, flags = None, name = ''):
     if flags is None:
@@ -96,10 +101,8 @@ class PeerManager:
         self._optimistic_unchoke_peer_lock = RWLock("_optimistic_unchoke_peer_lock")
         self._last_peer_update = time.time()
         self._last_peer_update_lock = RWLock("_last_peer_update_lock")
-        self._peer_update_interval = 30
-        self._peer_update_interval_lock = RWLock("_peer_update_interval_lock")
-        self._reconnect_interval = 10
-        self._reconnect_interval_lock = RWLock("_reconnect_interval_lock")
+        self._last_piece_update = time.time()
+        self._last_piece_update_lock = RWLock("_last_piece_update_lock")
         self._last_reconnect = time.time()
         self._last_reconnect_lock = RWLock("_last_reconnect_lock")
         self._running = True
@@ -222,24 +225,15 @@ class PeerManager:
     def last_peer_update(self, value):
         with timed_lock(self._last_peer_update_lock.write_access, "_last_peer_update_lock.write_access"):
             self._last_peer_update = value
-
+            
     @property
-    def peer_update_interval(self):
-        with timed_lock(self._peer_update_interval_lock.read_access, "_peer_update_interval_lock.read_access"):
-            return self._peer_update_interval
-    @peer_update_interval.setter
-    def peer_update_interval(self, value):
-        with timed_lock(self._peer_update_interval_lock.write_access, "_peer_update_interval_lock.write_access"):
-            self._peer_update_interval = value
-
-    @property
-    def reconnect_interval(self):
-        with timed_lock(self._reconnect_interval_lock.read_access, "_reconnect_interval_lock.read_access"):
-            return self._reconnect_interval
-    @reconnect_interval.setter
-    def reconnect_interval(self, value):
-        with timed_lock(self._reconnect_interval_lock.write_access, "_reconnect_interval_lock.write_access"):
-            self._reconnect_interval = value
+    def last_piece_update(self):
+        with timed_lock(self._last_piece_update_lock.read_access, "_last_piece_update_lock.read_access"):
+            return self._last_piece_update
+    @last_piece_update.setter
+    def last_piece_update(self, value):
+        with timed_lock(self._last_piece_update_lock.write_access, "_last_piece_update_lock.write_access"):
+            self._last_piece_update = value
 
     @property
     def last_reconnect(self):
@@ -328,17 +322,17 @@ class PeerManager:
     def _add_connected_peer(self, peer):
         with timed_lock(self._connected_peers_lock.write_access, "_connected_peers_lock.write_access"):
             self._connected_peers.append(peer)
-        self.update_rarest_piece_min_heap()
+        self.update_rarest_piece_min_heap(time.time())
 
     def _remove_connected_peer(self, peer):
         with timed_lock(self._connected_peers_lock.write_access, "_connected_peers_lock.write_access"):
             self._connected_peers.remove(peer)
-        self.update_rarest_piece_min_heap()
+        self.update_rarest_piece_min_heap(time.time())
 
     def _clear_connected_peers(self):
         with timed_lock(self._connected_peers_lock.write_access, "_connected_peers_lock.write_access"):
             self._connected_peers.clear()
-        self.update_rarest_piece_min_heap()
+        self.update_rarest_piece_min_heap(time.time())
 
     def _get_connected_peers_count(self):
         with timed_lock(self._connected_peers_lock.read_access, "_connected_peers_lock.read_access"):
@@ -348,31 +342,42 @@ class PeerManager:
         with timed_lock(self._connected_peers_lock.read_access, "_connected_peers_lock.read_access"):
             return peer in self._connected_peers
 
-    def update_rarest_piece_min_heap(self):
+    def update_rarest_piece_min_heap(self, current_time):
+        self.last_piece_update = current_time
         self.rarest_piece_min_heap = self._piece_manager.getRarestPieceMinHeap(self.connected_peers)
 
     def _periodic_rarest_piece_update(self):
         while self.running:
             try:
-                self.update_rarest_piece_min_heap()
-                time.sleep(60)
+                current_time = time.time()
+                if current_time - self.last_piece_update >= MIN_PIECE_UPDATE_INTERVAL:
+                    update = current_time - self.last_piece_update >= DEFAULT_PIECE_UPDATE_INTERVAL
+                    if not update and not self.download_started:
+                        downloaded = self.piece_manager.num_of_downloaded_pieces()
+                        requested = self.piece_manager.num_of_requested_pieces()
+                        update = downloaded + requested < 15
+                        self.download_started = downloaded + requested >= 15
+                    if update:
+                        self.update_rarest_piece_min_heap(current_time)
+                time.sleep(1)
             except Exception as e:
                 log_error("Error in rarest piece update thread", e)
-                time.sleep(30)
+                time.sleep(5)
 
     def _periodic_peer_update(self):
         while self.running:
             try:
                 current_time = time.time()
-                update = current_time - self.last_peer_update >= self.peer_update_interval
-                if not update and not self.download_started:
-                    downloaded = self.piece_manager.num_of_downloaded_pieces()
-                    requested = self.piece_manager.num_of_requested_pieces()
-                    update = downloaded + requested < 15
-                    self.download_started = downloaded + requested >= 15
-                if update:
-                    self._update_peers(current_time)
-                if current_time - self.last_reconnect >= self.reconnect_interval:
+                if current_time - self.last_peer_update >= MIN_PEER_UPDATE_INTERVAL:
+                    update = current_time - self.last_peer_update >= DEFAULT_PEER_UPDATE_INTERVAL
+                    if not update and not self.download_started:
+                        downloaded = self.piece_manager.num_of_downloaded_pieces()
+                        requested = self.piece_manager.num_of_requested_pieces()
+                        update = downloaded + requested < 15
+                        self.download_started = downloaded + requested >= 15
+                    if update:
+                        self._update_peers(current_time)
+                if current_time - self.last_reconnect >= RECONNECT_INTERVAL:
                     self._reconnect_peers()
                     self.last_reconnect = current_time
                 time.sleep(1)
@@ -394,7 +399,6 @@ class PeerManager:
                     self.launch_thread(peerObj)
         except Exception as e:
             log_error("Error updating peer list", e)
-            self.peer_update_interval = min(60, self.peer_update_interval * 1.5)
 
     def _reconnect_peers(self):
         try:

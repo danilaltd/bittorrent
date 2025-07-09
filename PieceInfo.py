@@ -43,6 +43,8 @@ class PieceInfo:
         self._requested_pieces_lock = RWLock("_requested_pieces_lock")
         self._empty_pieces: set[int] = set()
         self._empty_pieces_lock = RWLock("_empty_pieces_lock")
+        self._downloaded_blocks= 0
+        self._downloaded_blocks_lock = RWLock("_downloaded_blocks_lock")
         self._pieces_SHA1 = []
         self._pieces_SHA1_lock = RWLock("_pieces_SHA1_lock")
         self._totalBlocks = 0
@@ -115,6 +117,15 @@ class PieceInfo:
     def empty_pieces(self, value):
         with timed_lock(self._empty_pieces_lock.write_access, "_empty_pieces_lock.write_access"):
             self._empty_pieces = value
+            
+    @property
+    def downloaded_blocks(self):
+        with timed_lock(self._downloaded_blocks_lock.read_access, "_downloaded_blocks_lock.read_access"):
+            return self._downloaded_blocks
+    @downloaded_blocks.setter
+    def downloaded_blocks(self, value):
+        with timed_lock(self._downloaded_blocks_lock.write_access, "_downloaded_blocks_lock.write_access"):
+            self._downloaded_blocks = value
 
     @property
     def pieces_SHA1(self):
@@ -261,12 +272,12 @@ class PieceInfo:
         return files
         
     
-    def _print_progress_bar_internal(self, iteration, total, suffix, decimals, print_matrix, peers, matrix_data):
+    def _print_progress_bar_internal(self, suffix, decimals, print_matrix, peers, matrix_data):
         """Internal method for printing progress bar without locks"""
         # Calculate download speed
         out = ""
         out += f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n'
-        out += self._progress_bar_string_internal(iteration, total, decimals, suffix) 
+        out += self._progress_bar_string_internal(decimals, suffix) 
         
         if peers is not None:
             out += self._peer_stats_string_internal(peers)   
@@ -282,33 +293,27 @@ class PieceInfo:
         except Exception as e:
             print(f'error in status: {e}')
 
-    def _progress_bar_string_internal(self, iteration, total, decimals, suffix):
+    def _progress_bar_string_internal(self, decimals, suffix):
         """Internal method for progress bar string without locks"""
+        total = self.totalBlocks
         current_time = time.time()
-        if not hasattr(self, 'last_update_time'):
+        time_diff = current_time - self.last_update_time
+        if time_diff >= 0.5:
+            blocks_done = self.downloaded_blocks
+            current_bytes = blocks_done * BLOCK_SIZE
+            bytes_diff = current_bytes - self.last_bytes_done
+            
+            current_speed = bytes_diff / time_diff if time_diff > 0 else 0
+            
+            self.speed_history.append(current_speed)
+            if len(self.speed_history) > 5:
+                self.speed_history.pop(0)
+            
+            self.download_speed = sum(self.speed_history) / len(self.speed_history)
+            
             self.last_update_time = current_time
-            self.last_blocks_done = 0
-            self.last_bytes_done = 0
-            self.download_speed = 0
-            self.speed_history = []
-        else:
-            time_diff = current_time - self.last_update_time
-            if time_diff >= 0.5:
-                blocks_done = self.num_of_downloaded_pieces()
-                current_bytes = blocks_done * BLOCK_SIZE
-                bytes_diff = current_bytes - self.last_bytes_done
-                
-                current_speed = bytes_diff / time_diff if time_diff > 0 else 0
-                
-                self.speed_history.append(current_speed)
-                if len(self.speed_history) > 5:
-                    self.speed_history.pop(0)
-                
-                self.download_speed = sum(self.speed_history) / len(self.speed_history)
-                
-                self.last_update_time = current_time
-                self.last_blocks_done = blocks_done
-                self.last_bytes_done = current_bytes
+            self.last_blocks_done = blocks_done
+            self.last_bytes_done = current_bytes
 
         # Format speed
         if self.download_speed > 1024 * 1024:
@@ -332,7 +337,7 @@ class PieceInfo:
             eta_str = "∞"
 
         if total > 0:
-            percent = f"{100 * (self.last_blocks_done / total):.{decimals}f}"
+            percent = f"{100 * max((self.last_blocks_done / total), (self.num_of_downloaded_pieces()/self.number_of_pieces)):.{decimals}f}"
         else:
             percent = "0.0"
         
@@ -382,11 +387,21 @@ class PieceInfo:
                 peer_id = peer.ip
                 available = peer.avaliable_pieces(needed_pieces)
                 
+                
                 active = available > 0
-                sign = '+' if active else '-'
                 if active:
                     active_peers += 1
-                table += f'  {sign} {peer_id}: {available} pieces; Blocks recieved: {peer.blocks_recieved}; Connections: {peer.requests_sent}; Pending: {peer.pending_requests}; Bad: {peer.bad_peer}\n'
+                strings = []    
+                sign = '+' if active else '-'
+                strings.append(f"{sign:<2}")
+                strings.append(f"{peer_id:<15}")
+                strings.append(f"Pieces: {available:<4}")
+                strings.append(f"Blocks: {peer.blocks_recieved:<4}")
+                strings.append(f"Connections: {peer.requests_sent:<3}")
+                strings.append(f"Pending: {peer.pending_requests:<3}")
+                strings.append(f"Bad: {'+' if peer.bad_peer else '-':<5}")
+                strings.append(f"Unchocked: {'+' if not peer.peer_choking else '-':<5}")
+                table += ' '.join(strings) + '\n'
         except Exception as e:
             res += f'\n[Peer stats error: {e}]\n'
             res += f'Traceback:\n{traceback.format_exc()}'
@@ -410,8 +425,9 @@ class PieceInfo:
 
     def monitor_block_timeouts_safe(self, timeout=3):
         pieces = self.pieces.copy()
-        for piece in pieces:
-            piece.monitor_block_timeouts(timeout)
+        for piece_index, piece in enumerate(pieces):
+            piece_status = piece.monitor_block_timeouts(timeout)
+            self._fix_sets(piece_status, piece_index)
     
     def getRarestPieceMinHeap(self, connectedPeers: list[Peer]):
         piece_listOfpeers = {}
@@ -423,9 +439,9 @@ class PieceInfo:
             if peer.peer_choking != 0:
                 continue
             if peer.bit_field:
-                for index, piece in enumerate(peer.bit_field):
+                for index in range(len(peer.bit_field)):
                     if peer.bit_field[index]:
-                        piece_listOfpeers[index].append(peer)             
+                        piece_listOfpeers[index].append(peer)
         piece_listOfpeers = (sorted(piece_listOfpeers.items(), key =
              lambda kv:(len(kv[1]), kv[0])))  
         result: list[tuple[int, list[Peer]]] = []
@@ -500,6 +516,9 @@ class PieceInfo:
 
     def num_of_requested_pieces(self):
         return len(self.requested_pieces)
+    
+    def num_of_empty_pieces(self):
+        return len(self.empty_pieces)
 
     def is_piece_complete(self, piece_index):
         return piece_index in self.downloaded_pieces
@@ -517,29 +536,33 @@ class PieceInfo:
     def all_piece_complete_safe(self):
         return len(self.downloaded_pieces) == self.number_of_pieces
 
-    def print_progress_bar_safe(self, iteration, total, suffix='Complete', decimals=1, print_matrix=False, peers=None):
+    def print_progress_bar_safe(self, suffix='Complete', decimals=1, print_matrix=False, peers=None):
         matrix_copy = self._get_pieces_matrix_safe()
         # matrix_copy = None
-        self._print_progress_bar_internal(iteration, total, suffix, decimals, print_matrix, peers, matrix_copy)
+        self._print_progress_bar_internal(suffix, decimals, print_matrix, peers, matrix_copy)
 
     def update_block_status_safe(self, piece_index, block_index, status: Status, data=None, last_requested=None):
         piece: Piece = self.get_piece_safe(piece_index)
         if piece:
-            pieceStatus = piece.changeStatus(block_index, status, data, last_requested)
-            if pieceStatus == Status.EMPTY:
-                self.downloaded_pieces.discard(piece_index)
-                self.requested_pieces.discard(piece_index)
-                self.empty_pieces.add(piece_index)
-            elif pieceStatus == Status.REQUESTED:
-                self.downloaded_pieces.discard(piece_index)
-                self.empty_pieces.discard(piece_index)
-                self.requested_pieces.add(piece_index)
-            elif pieceStatus == Status.RECEIVED:
-                self.downloaded_pieces.add(piece_index)
-                self.empty_pieces.discard(piece_index)
-                self.requested_pieces.discard(piece_index)
+            piece_status, fix_blocks = piece.changeStatus(block_index, status, data, last_requested)
+            self._fix_sets(piece_status, piece_index)
+            self.downloaded_blocks += fix_blocks
             return True
         return False
+    
+    def _fix_sets(self, piece_status, piece_index):
+        if piece_status == Status.EMPTY:
+            self.downloaded_pieces.discard(piece_index)
+            self.requested_pieces.discard(piece_index)
+            self.empty_pieces.add(piece_index)
+        elif piece_status == Status.REQUESTED:
+            self.downloaded_pieces.discard(piece_index)
+            self.empty_pieces.discard(piece_index)
+            self.requested_pieces.add(piece_index)
+        elif piece_status == Status.RECEIVED:
+            self.downloaded_pieces.add(piece_index)
+            self.empty_pieces.discard(piece_index)
+            self.requested_pieces.discard(piece_index)
 
 
     def write_into_file_safe(self):
