@@ -6,6 +6,7 @@ from datetime import datetime
 import os
 from logger import timed_lock
 from rwlock import RWLock
+import traceback
 
 def RoundUp(x):
     return ((x + 7) & (-8))
@@ -77,8 +78,6 @@ class Peer:
         self._peer_interested_lock = RWLock("_peer_interested_lock")
         self._connection_time = None
         self._connection_time_lock = RWLock("_connection_time_lock")
-        self._last_transmission = None
-        self._last_transmission_lock = RWLock("_last_transmission_lock")
         self._rate = None
         self._rate_lock = RWLock("_rate_lock")
         self._uploaded = 0
@@ -220,15 +219,6 @@ class Peer:
             self._connection_time = value
 
     @property
-    def last_transmission(self):
-        with timed_lock(self._last_transmission_lock.read_access, "_last_transmission_lock.read_access"):
-            return self._last_transmission
-    @last_transmission.setter
-    def last_transmission(self, value):
-        with timed_lock(self._last_transmission_lock.write_access, "_last_transmission_lock.write_access"):
-            self._last_transmission = value
-
-    @property
     def rate(self):
         with timed_lock(self._rate_lock.read_access, "_rate_lock.read_access"):
             return self._rate
@@ -351,8 +341,10 @@ class Peer:
             return self._last_activity
     @last_activity.setter
     def last_activity(self, value):
-        with timed_lock(self._last_activity_lock.write_access, "_last_activity_lock.write_access"):
-            self._last_activity = value
+        mem = self.last_activity
+        if mem is None or value is None or value - mem >= 1:
+            with timed_lock(self._last_activity_lock.write_access, "_last_activity_lock.write_access"):
+                self._last_activity = value
 
     @property
     def inactivity_timeout(self):
@@ -387,8 +379,10 @@ class Peer:
             return self._last_request_time
     @last_request_time.setter
     def last_request_time(self, value):
-        with timed_lock(self._last_request_time_lock.write_access, "_last_request_time_lock.write_access"):
-            self._last_request_time = value
+        mem = self.last_request_time
+        if mem is None or value is None or value - mem >= 1:
+            with timed_lock(self._last_request_time_lock.write_access, "_last_request_time_lock.write_access"):
+                self._last_request_time = value
 
     @property
     def bad_peer(self):
@@ -503,14 +497,14 @@ class Peer:
                 return None
             
             # Обновляем состояние под блокировкой (быстрая операция)
+            current_time = time.time()
             self.sock = sock
             self.ip_port = ip_port
-            self.last_transmission = time.time()
-            self.last_keepalive = time.time()
-            self.last_activity = time.time()
+            self.last_keepalive = current_time
+            self.update_activity(current_time)
             self.connection_attempts = 0
             self.connected = True
-            self.connection_time = time.time()
+            self.connection_time = current_time
             self.handshake_sent = False
             self.handshake_received = False
             
@@ -538,7 +532,7 @@ class Peer:
                     pass
             return None
         except Exception as e:
-            log_info(f"Connection error for {ip_port}: {str(e)}")
+            log_info(f"Connection error for {ip_port}: {str(e)}, \nTraceback:\n{traceback.format_exc()}")
             self.connection_attempts += 1
             self.connected = False
             if 'sock' in locals():
@@ -583,7 +577,6 @@ class Peer:
                     
                 self.send_data(b'\x00\x00\x00\x00')  # Keepalive message
                 self.last_keepalive = current_time
-                self.last_activity = current_time
                 return True
             except (socket.error, OSError, AttributeError) as e:
                 log_info(f"Keepalive send failed for {self.ip_port}: {e}")
@@ -601,21 +594,17 @@ class Peer:
             return True
         return False
 
-    def update_activity(self):
-        """Update last activity timestamp"""
-        self.last_activity = time.time()
+    def update_activity(self, current_time = None):
+        if current_time is None:
+            current_time = time.time()
+        self.last_activity = current_time
         
     def send_data(self, data):
-        if not self.connected or not self.sock:
-            log_error(f"{{self.ip_port}} not self.connected or not self.sock: {self.connected} {self.sock}")
-            return False
-            
         try:
             if not self.connected or not self.sock:
-                return False
+                raise Exception(f"not self.connected or not self.sock: {self.connected} {not not self.sock}")
             self.sock.sendall(data)
-            self.last_transmission = time.time()
-            self.last_activity = time.time()
+            self.update_activity()
             log_info(f"Send data was ok {self.ip_port}")
             return True
         except Exception as e:

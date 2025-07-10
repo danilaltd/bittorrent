@@ -1,8 +1,23 @@
 import sys
 import threading
 import time
+import os
 import functools
 from contextlib import contextmanager
+from datetime import datetime
+
+def log_info(msg, flags = None):
+    if flags is None:
+        flags = []
+    flags.insert(0, f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    log_entry = f'{msg}\n'
+    res = ''
+    for flag in flags:
+        res += f"[{flag}]"
+    res += ' '    
+    res += log_entry    
+    with open(os.path.join('logs', "locks.log"), 'a', encoding='utf-8') as f:
+        f.write(res)
 
 class Logger:
     RED = '\033[91m'
@@ -37,8 +52,9 @@ class Logger:
     def lock_wait(lock_name, wait_time, thread_name=None):
         """Логирует время ожидания lock"""
         thread_info = f" (thread: {thread_name})" if thread_name else ""
-        if wait_time > 5:  # Логируем только если ждали больше 100мс
-            print(f'{Logger.BLUE}[LOCK] Waiting {wait_time:.3f}s for {lock_name}{thread_info}{Logger.END}')
+        if wait_time > 0.0001:  # Логируем только если ждали больше 100мс
+            # print(f'{Logger.BLUE}[LOCK] Waiting {wait_time:.3f}s for {lock_name}{thread_info}{Logger.END}')
+            log_info(f'Waiting {wait_time:.4f}s for {lock_name}{thread_info}', flags=['LOCK'])
 
 # Глобальный словарь для отслеживания статистики locks
 _lock_stats = {}
@@ -110,6 +126,22 @@ def timed_lock(lock, lock_name, timeout=None):
                     _lock_stats[lock_name]['current_holders'] -= 1
             
             lock.release()
+
+# @contextmanager
+# def timed_lock(lock, lock_name, timeout=None):
+#     acquired = False
+    
+#     try:
+#         # print(f"{lock_name} in")
+#         lock.acquire()
+#         # print(f"{lock_name} out")
+#         acquired = True
+        
+#         yield
+        
+#     finally:
+#         if acquired:
+#             lock.release()
 
 def lock_decorator(lock_name, timeout=None):
     """

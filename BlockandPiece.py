@@ -249,5 +249,17 @@ class Piece:
         return self.getStatus()
                     
     def is_block_empty(self, block_index):
-        return self.blocks[block_index].status == Status.EMPTY
+        # return self.blocks[block_index].status == Status.EMPTY
+        return block_index in self.empty_blocks
+    
+    def empty_blocks_list(self):
+        return list(self.empty_blocks)
+    
+    def merge_blocks(self):
+        res = b""
+        for block in self.blocks:
+            if block.status != Status.RECEIVED or not block.data:
+                return None
+            res += block.data
+        return res
         

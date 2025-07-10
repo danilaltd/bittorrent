@@ -14,6 +14,7 @@ from peer import Peer
 from rwlock import RWLock
 import threading
 import traceback
+import queue
 colorama.init(autoreset=True)
 
 def log_info(msg, flags = None):
@@ -37,14 +38,20 @@ class PieceInfo:
         self._number_of_pieces_lock = RWLock("_number_of_pieces_lock")
         self._pieces: list[Piece] = []
         self._pieces_lock = RWLock("_pieces_lock")
-        self._downloaded_pieces: set[int] = set()
-        self._downloaded_pieces_lock = RWLock("_downloaded_pieces_lock")
-        self._requested_pieces: set[int] = set()
-        self._requested_pieces_lock = RWLock("_requested_pieces_lock")
-        self._empty_pieces: set[int] = set()
-        self._empty_pieces_lock = RWLock("_empty_pieces_lock")
+        
+        self._statuses = [Status.EMPTY] * self._number_of_pieces
+        self._statuses_lock = RWLock("_statuses_lock")
+        self._downloaded_count = 0
+        self._downloaded_count_lock = RWLock("_downloaded_count_lock")
+        self._requested_count = 0
+        self._requested_count_lock = RWLock("_requested_count_lock")
+        self._empty_count = self._number_of_pieces
+        self._empty_count_lock = RWLock("_empty_count_lock")
+
+        
+        
         self._downloaded_blocks= 0
-        self._downloaded_blocks_lock = RWLock("_downloaded_blocks_lock")
+        self._downloaded_blocks_lock_int = RWLock("_downloaded_blocks_lock_int")
         self._pieces_SHA1 = []
         self._pieces_SHA1_lock = RWLock("_pieces_SHA1_lock")
         self._totalBlocks = 0
@@ -63,6 +70,11 @@ class PieceInfo:
         self._download_speed_lock = RWLock("_download_speed_lock")
         self._speed_history = []
         self._speed_history_lock = RWLock("_speed_history_lock")
+        
+        self._queue = queue.Queue()
+        self._worker = threading.Thread(target=self._worker_loop, daemon=True)
+        self._worker.start()
+
 
     @property
     def torrent(self):
@@ -92,39 +104,70 @@ class PieceInfo:
             self._pieces = value
             
     @property
-    def downloaded_pieces(self):
-        with timed_lock(self._downloaded_pieces_lock.read_access, "_downloaded_pieces_lock.read_access"):
-            return self._downloaded_pieces
-    @downloaded_pieces.setter
-    def downloaded_pieces(self, value):
-        with timed_lock(self._downloaded_pieces_lock.write_access, "_downloaded_pieces_lock.write_access"):
-            self._downloaded_pieces = value
+    def statuses(self):
+        with timed_lock(self._statuses_lock.read_access, "_statuses_lock.read_access"):
+            return self._statuses
+    @statuses.setter
+    def statuses(self, value):
+        with timed_lock(self._statuses_lock.write_access, "_statuses_lock.write_access"):
+            self._statuses = value
+            
+    def _set_status(self, index: int, new_status: Status):
+        with timed_lock(self._statuses_lock.write_access, "_statuses_lock.write_access"):
+            old_status = self._statuses[index]
+            if old_status is new_status:
+                return  # ничего не менялось
+            self._statuses[index] = new_status
+            
+
+        if old_status is Status.EMPTY:
+            self.empty_count -= 1
+        elif old_status is Status.REQUESTED:
+            self.requested_count -= 1
+        elif old_status is Status.RECEIVED:
+            self.downloaded_count -= 1
+
+        if new_status is Status.EMPTY:
+            self.empty_count += 1
+        elif new_status is Status.REQUESTED:
+            self.requested_count += 1
+        elif new_status is Status.RECEIVED:
+            self.downloaded_count += 1
             
     @property
-    def requested_pieces(self):
-        with timed_lock(self._requested_pieces_lock.read_access, "_requested_pieces_lock.read_access"):
-            return self._requested_pieces
-    @requested_pieces.setter
-    def requested_pieces(self, value):
-        with timed_lock(self._requested_pieces_lock.write_access, "_requested_pieces_lock.write_access"):
-            self._requested_pieces = value
+    def downloaded_count(self):
+        with timed_lock(self._downloaded_count_lock.read_access, "_downloaded_count_lock.read_access"):
+            return self._downloaded_count
+    @downloaded_count.setter
+    def downloaded_count(self, value):
+        with timed_lock(self._downloaded_count_lock.write_access, "_downloaded_count_lock.write_access"):
+            self._downloaded_count = value
             
     @property
-    def empty_pieces(self):
-        with timed_lock(self._empty_pieces_lock.read_access, "_empty_pieces_lock.read_access"):
-            return self._empty_pieces
-    @empty_pieces.setter
-    def empty_pieces(self, value):
-        with timed_lock(self._empty_pieces_lock.write_access, "_empty_pieces_lock.write_access"):
-            self._empty_pieces = value
+    def requested_count(self):
+        with timed_lock(self._requested_count_lock.read_access, "_requested_count_lock.read_access"):
+            return self._requested_count
+    @requested_count.setter
+    def requested_count(self, value):
+        with timed_lock(self._requested_count_lock.write_access, "_requested_count_lock.write_access"):
+            self._requested_count = value
             
+    @property
+    def empty_count(self):
+        with timed_lock(self._empty_count_lock.read_access, "_empty_count_lock.read_access"):
+            return self._empty_count
+    @empty_count.setter
+    def empty_count(self, value):
+        with timed_lock(self._empty_count_lock.write_access, "_empty_count_lock.write_access"):
+            self._empty_count = value
+    
     @property
     def downloaded_blocks(self):
-        with timed_lock(self._downloaded_blocks_lock.read_access, "_downloaded_blocks_lock.read_access"):
+        with timed_lock(self._downloaded_blocks_lock_int.read_access, "_downloaded_blocks_lock_int.read_access"):
             return self._downloaded_blocks
     @downloaded_blocks.setter
     def downloaded_blocks(self, value):
-        with timed_lock(self._downloaded_blocks_lock.write_access, "_downloaded_blocks_lock.write_access"):
+        with timed_lock(self._downloaded_blocks_lock_int.write_access, "_downloaded_blocks_lock_int.write_access"):
             self._downloaded_blocks = value
 
     @property
@@ -208,7 +251,6 @@ class PieceInfo:
                 piece_length = self.torrent.piece_length
             piece = Piece(i, piece_length, self.pieces_SHA1[i])
             self.totalBlocks += piece.number_of_blocks
-            self.empty_pieces.add(i)
             self.pieces.append(piece)
     
     def _getSHA1(self):
@@ -218,15 +260,10 @@ class PieceInfo:
             self.pieces_SHA1.append(self.torrent.pieces[start : end])
 
     def _merge_blocks(self, index):
-        res = b""
         piece = self.get_piece_safe(index)
         if not piece:
             return None
-        for block in piece.blocks:
-            if block.status != Status.RECEIVED or not block.data:
-                return None
-            res += block.data
-        return res
+        return piece.merge_blocks()
         
     def _load_files(self):
         files = []
@@ -272,7 +309,7 @@ class PieceInfo:
         return files
         
     
-    def _print_progress_bar_internal(self, suffix, decimals, print_matrix, peers, matrix_data):
+    def _print_progress_bar_internal(self, suffix, decimals, print_matrix, peers):
         """Internal method for printing progress bar without locks"""
         # Calculate download speed
         out = ""
@@ -282,6 +319,7 @@ class PieceInfo:
         if peers is not None:
             out += self._peer_stats_string_internal(peers)   
         
+        matrix_data = self._get_pieces_matrix_safe()
         if print_matrix and matrix_data:
             out += self._matrix_string_internal(matrix_data)
         
@@ -371,7 +409,7 @@ class PieceInfo:
         try:
             res += '\nPeers: %d' % len(peers)
             # needed_pieces_count = self.number_of_pieces - self.num_of_downloaded_pieces()
-            needed_pieces = self.empty_pieces.copy()
+            # needed_pieces = self.empty_pieces.copy()
             
             sorted_peers = sorted(peers, key=lambda peer: (not peer.connected, -peer.blocks_recieved))
             
@@ -385,17 +423,17 @@ class PieceInfo:
                     table += "Not conected:\n"
                     border = True
                 peer_id = peer.ip
-                available = peer.avaliable_pieces(needed_pieces)
+                # available = peer.avaliable_pieces(needed_pieces)
                 
                 
-                active = available > 0
-                if active:
-                    active_peers += 1
+                # active = available > 0
+                # if active:
+                    # active_peers += 1
                 strings = []    
-                sign = '+' if active else '-'
-                strings.append(f"{sign:<2}")
+                # sign = '+' if active else '-'
+                # strings.append(f"{sign:<2}")
                 strings.append(f"{peer_id:<15}")
-                strings.append(f"Pieces: {available:<4}")
+                # strings.append(f"Pieces: {available:<4}")
                 strings.append(f"Blocks: {peer.blocks_recieved:<4}")
                 strings.append(f"Connections: {peer.requests_sent:<3}")
                 strings.append(f"Pending: {peer.pending_requests:<3}")
@@ -477,16 +515,16 @@ class PieceInfo:
         else:
             res = self.torrent.piece_length
             
-        real = self.get_piece_safe(piece_index).piece_size
-        if res != real:
-            print("get_piece_size")
+        # real = self.get_piece_safe(piece_index).piece_size
+        # if res != real:
+            # print("get_piece_size")
         return res
     
     def get_blocks_len(self, piece_index: int):
         res = ceil(self.get_piece_size(piece_index) / BLOCK_SIZE)
-        real = self.get_piece_safe(piece_index).number_of_blocks
-        if res != real:
-            print(f"get_blocks_len: params: {piece_index}; res: {res}; real: {real}")
+        # real = self.get_piece_safe(piece_index).number_of_blocks
+        # if res != real:
+            # print(f"get_blocks_len: params: {piece_index}; res: {res}; real: {real}")
         return res
     
     def get_block_size(self, piece_index, block_index):
@@ -500,9 +538,9 @@ class PieceInfo:
         else:
             res = piece_size
         
-        real = self.get_piece_safe(piece_index).blocks[block_index].block_size
-        if res != real:
-            print("get_block_size")
+        # real = self.get_piece_safe(piece_index).blocks[block_index].block_size
+        # if res != real:
+            # print("get_block_size")
         return res
 
     def get_piece_safe(self, piece_index: int) -> Piece:
@@ -511,58 +549,65 @@ class PieceInfo:
             return pieces[piece_index]
         return None
 
-    def num_of_downloaded_pieces(self):
-        return len(self.downloaded_pieces)
+    def get_empty_blocks(self, piece_index):
+        piece = self.get_piece_safe(piece_index)
+        if not piece:
+            return []
+        return piece.empty_blocks_list()
+    
+    def is_index_valid(self, piece_index: int) -> bool:
+        return 0 <= piece_index < self.number_of_pieces
 
-    def num_of_requested_pieces(self):
-        return len(self.requested_pieces)
-    
-    def num_of_empty_pieces(self):
-        return len(self.empty_pieces)
+    def num_of_downloaded_pieces(self) -> int:
+        return self.downloaded_count
 
-    def is_piece_complete(self, piece_index):
-        return piece_index in self.downloaded_pieces
-    
-    def is_piece_requested(self, piece_index):
-        return piece_index in self.requested_pieces
-    
-    def is_piece_empty(self, piece_index):
-        return piece_index in self.empty_pieces
-    
+    def num_of_requested_pieces(self) -> int:
+        return self.requested_count
+
+    def num_of_empty_pieces(self) -> int:
+        return self.empty_count
+
+    def is_piece_complete(self, piece_index: int) -> bool:
+        return self.statuses[piece_index] is Status.RECEIVED
+
+    def is_piece_requested(self, piece_index: int) -> bool:
+        return self.statuses[piece_index] is Status.REQUESTED
+
+    def is_piece_empty(self, piece_index: int) -> bool:
+        return self.statuses[piece_index] is Status.EMPTY
+
     def is_block_empty(self, piece_index, block_index):
         res = self.get_piece_safe(piece_index).is_block_empty(block_index)
         return res
 
     def all_piece_complete_safe(self):
-        return len(self.downloaded_pieces) == self.number_of_pieces
+        return self.num_of_downloaded_pieces() == self.number_of_pieces
 
     def print_progress_bar_safe(self, suffix='Complete', decimals=1, print_matrix=False, peers=None):
-        matrix_copy = self._get_pieces_matrix_safe()
-        # matrix_copy = None
-        self._print_progress_bar_internal(suffix, decimals, print_matrix, peers, matrix_copy)
+        self._print_progress_bar_internal(suffix, decimals, print_matrix, peers)
 
     def update_block_status_safe(self, piece_index, block_index, status: Status, data=None, last_requested=None):
         piece: Piece = self.get_piece_safe(piece_index)
         if piece:
             piece_status, fix_blocks = piece.changeStatus(block_index, status, data, last_requested)
             self._fix_sets(piece_status, piece_index)
-            self.downloaded_blocks += fix_blocks
+            if fix_blocks != 0:
+                self.downloaded_blocks += fix_blocks
             return True
         return False
     
     def _fix_sets(self, piece_status, piece_index):
-        if piece_status == Status.EMPTY:
-            self.downloaded_pieces.discard(piece_index)
-            self.requested_pieces.discard(piece_index)
-            self.empty_pieces.add(piece_index)
-        elif piece_status == Status.REQUESTED:
-            self.downloaded_pieces.discard(piece_index)
-            self.empty_pieces.discard(piece_index)
-            self.requested_pieces.add(piece_index)
-        elif piece_status == Status.RECEIVED:
-            self.downloaded_pieces.add(piece_index)
-            self.empty_pieces.discard(piece_index)
-            self.requested_pieces.discard(piece_index)
+        # self._set_status(piece_index, piece_status)
+        self._queue.put((piece_index, piece_status))
+
+    def _worker_loop(self):
+        while True:
+            index, new_status = self._queue.get()
+            try:
+                self._set_status(index, new_status)
+            finally:
+                self._queue.task_done()
+
 
 
     def write_into_file_safe(self):

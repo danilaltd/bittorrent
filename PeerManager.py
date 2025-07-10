@@ -18,6 +18,7 @@ import os
 from datetime import datetime
 from logger import timed_lock, lock_decorator, print_lock_stats
 from rwlock import RWLock
+import traceback
 
 MAX_CONNECTED_PEER = 50
 MIN_PEER_UPDATE_INTERVAL = 3
@@ -460,7 +461,6 @@ class PeerManager:
                     log_info(f"{peer.ip_port}: got message with {message_length} bytes", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
                     if message_length == 0:
                         # Keep-alive message
-                        peer.update_activity()
                         continue
                         
                     message_ID = self._read_bytes_from_sock(1, peer)
@@ -469,7 +469,6 @@ class PeerManager:
                         continue
                         
                     message_ID_u = struct.unpack(">B", message_ID)[0]
-                    peer.update_activity()
                     
                     # Handle message based on ID
                     if message_ID_u == 0:  # Choke
@@ -538,7 +537,7 @@ class PeerManager:
                                 continue
                             piece_index = struct.unpack(">I", piece_index_b)[0]
                             block_offset = struct.unpack(">I", block_offset_b)[0]
-                            peer.pending_requests = max(0, peer.pending_requests - 1)
+                            # peer.pending_requests = max(0, peer.pending_requests - 1)
                             # Validate piece index
                             if piece_index >= len(self.piece_manager.pieces):
                                 log_error(f"Invalid piece index {piece_index} from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
@@ -546,16 +545,15 @@ class PeerManager:
                                 
                             block_index = block_offset // BLOCK_SIZE
                             
-                            # Get piece safely
-                            piece = self.piece_manager.get_piece_safe(piece_index)
-                            if not piece:
-                                log_error(f"Invalid piece index {piece_index} from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                continue
+                            # # Get piece safely
+                            # if not self.piece_manager.is_index_valid(piece_index):
+                            #     log_error(f"Invalid piece index {piece_index} from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                            #     continue
                             
-                            # Validate block index
-                            if block_index >= len(piece.blocks):
-                                log_error(f"Invalid block index {block_index} for piece {piece_index} from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                continue
+                            # # Validate block index
+                            # if block_index >= self.piece_manager.get_blocks_len(piece_index):
+                            #     log_error(f"Invalid block index {block_index} for piece {piece_index} from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                            #     continue
                             
                             block_data = self._read_bytes_from_sock(message_length - 9, peer)
                             if block_data is None:
@@ -572,7 +570,7 @@ class PeerManager:
                                                                                 
                                 # Request next block if piece is not complete
                                 if self.piece_manager.is_piece_empty(piece_index):
-                                    self._request_next_block(piece.piece_index, peer)
+                                    self._request_next_block(piece_index, peer)
                             
                             # print(f"read sock wrote {piece_index}")
                                 
@@ -616,26 +614,17 @@ class PeerManager:
             if not peer or peer.peer_choking:
                 return
                 
-            # Find next block to request
-            next_block = None
-                
-            # Get piece safely to check blocks
-            piece_safe = self.piece_manager.get_piece_safe(piece_index)
-            if not piece_safe:
-                return
-                
-            for i in range(len(piece_safe.blocks)):
-                if piece_safe.blocks[i].status == Status.EMPTY and not piece_safe.blocks[i].last_requested:
-                    next_block = (i, piece_safe.blocks[i])
-                    break
+            blocks = self.piece_manager.get_empty_blocks(piece_index)
+            if blocks:
+                block_index = blocks[0]
+            else:
+                block_index = None
                     
-            if not next_block:
+            if block_index is None:
                 return
                 
-            block_index, block = next_block
-            
             # Send request
-            request_block = self.request_blockByteString(piece_index, block_index, block.block_size)
+            request_block = self.request_blockByteString(piece_index, block_index, self.piece_manager.get_block_size(piece_index, block_index))
             if request_block:
                 peer.send_data(request_block)
                 # Update last_requested safely
@@ -645,10 +634,11 @@ class PeerManager:
                 )
                 
         except Exception as e:
-            log_error(f"Error requesting next block for piece {piece_index}", e)
+            log_error(f"Error requesting next block for piece {piece_index}, \n{traceback.format_exc()}", e)
 
     @staticmethod
     def _read_bytes_from_sock(length: int, peer: Peer):
+        peer.update_activity()
         if length <= 0:
             log_error(f"Invalid piece data length {length} from {peer.ip_port}", flags=['piece Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
             return None
@@ -791,8 +781,6 @@ class PeerManager:
                 try:
                     if peer.send_data(interested_message):
                         peer.am_interested = 1
-                        peer.last_transmission = time.time()
-                        peer.update_activity()
                     interested_sent = True
                     break
                 except Exception as e:
@@ -847,60 +835,55 @@ class PeerManager:
             log_error(f"Error creating request message for piece {piece_index}, block {block_index}", e)
             return None
 
-    def prefetch_next_blocks(self, sock, piece_index, current_block_index, peer):
+    def prefetch_next_blocks(self, piece_index, current_block_index, peer):
         """Request next blocks from the same piece following BitTorrent protocol"""
         try:
             # Validate inputs
-            piece_safe = self.piece_manager.get_piece_safe(piece_index)
+            blocks_len = self.piece_manager.get_blocks_len(piece_index)
             if not peer or peer.peer_choking:
                 return
-            if current_block_index < 0 or current_block_index >= len(piece_safe.blocks):
+            if current_block_index < 0 or current_block_index >= blocks_len:
                 log_error(f"Invalid current block index {current_block_index} for piece {piece_index}")
                 return
                 
             # Get piece safely
-            # piece_safe = piece
-            if not piece_safe:
-                return
+            # if not piece_safe:
+                # return
                 
             # Calculate how many blocks we can request (protocol limit)
             max_requests = 5  # Standard BitTorrent limit
-            available_requests = max_requests - len([b for b in piece_safe.blocks if b.last_requested])
+            available_requests = max_requests
+            # available_requests = max_requests - len([b for b in piece_safe.blocks if b.last_requested])
             
             if available_requests <= 0:
                 return
                 
             # Request next blocks in order
-            for i in range(1, min(available_requests + 1, len(piece_safe.blocks) - current_block_index)):
-                next_block_index = current_block_index + i
-                if next_block_index >= len(piece_safe.blocks):
-                    break
+            empty_blocks_sorted = sorted(self.piece_manager.get_empty_blocks(piece_index))
+            i = 0
+            while i < len(empty_blocks_sorted) and empty_blocks_sorted[i] <= current_block_index:
+                i += 1
+            empty_blocks = empty_blocks_sorted[i:i + available_requests]
+            for next_block_index in empty_blocks:
+                
+                request_block = self.request_blockByteString(piece_index, next_block_index, self.piece_manager.get_block_size(piece_index, next_block_index))
+                if not request_block:
+                    continue
                     
-                next_block: Block = piece_safe.blocks[next_block_index]
-                if next_block.status == Status.EMPTY and not next_block.last_requested:
-                    # Validate block size
-                    if next_block.block_size <= 0 or next_block.block_size > BLOCK_SIZE:
-                        log_error(f"Invalid block size {next_block.block_size} for piece {piece_index}")
-                        continue
-                        
-                    request_block = self.request_blockByteString(piece_index, next_block_index, next_block.block_size)
-                    if not request_block:
-                        continue
-                        
-                    peer.pending_requests += 1
-                    peer.requests_sent += 1
-                    peer.last_request_time = time.time()
+                # peer.pending_requests += 1
+                # peer.requests_sent += 1
+                peer.last_request_time = time.time()
+                
+                # Используем новый метод для безопасной отправки
+                if not peer.send_data(request_block):
+                    # peer.pending_requests = max(0, peer.pending_requests - 1)
+                    raise Exception("Failed to send prefetch request")
                     
-                    # Используем новый метод для безопасной отправки
-                    if not peer.send_data(request_block):
-                        peer.pending_requests = max(0, peer.pending_requests - 1)
-                        raise Exception("Failed to send prefetch request")
-                        
-                    # Update last_requested safely
-                    self.piece_manager.update_block_status_safe(
-                        piece_index, next_block_index, Status.REQUESTED,
-                        last_requested=time.time()
-                    )
+                # Update last_requested safely
+                self.piece_manager.update_block_status_safe(
+                    piece_index, next_block_index, Status.REQUESTED,
+                    last_requested=time.time()
+                )
                     
         except Exception as e:
             log_error(f"Error requesting next blocks for piece {piece_index}", e)

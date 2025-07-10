@@ -107,10 +107,10 @@ class Bittorrent:
                     continue
                 i+=1
                 try:
-                    
-                    thread = threading.Thread(target=self._request_piece_from_peers, args=(piece_i, peers))
-                    thread.daemon = True
-                    threads.append(thread)
+                    self._request_piece_from_peers(piece_i, peers)
+                    # thread = threading.Thread(target=self._request_piece_from_peers, args=(piece_i, peers))
+                    # thread.daemon = True
+                    # threads.append(thread)
                 except Exception as e:
                     Logger.error(f"Error creating thread for piece {piece_i}: {e}")
                     continue
@@ -167,11 +167,13 @@ class Bittorrent:
 
     def _request_blocks(self, peer: Peer, piece_index, max_blocks=16):
         try:
-            for block_index in range(min(max_blocks, self.peer_manager.piece_manager.get_blocks_len(piece_index))):
+            empty_blocks = sorted(self.peer_manager.piece_manager.get_empty_blocks(piece_index))[:max_blocks]
+            for block_index in empty_blocks:
+            # for block_index in range(min(max_blocks, self.peer_manager.piece_manager.get_blocks_len(piece_index))):
                 # Get piece safely to check block status
                 
-                if not self.peer_manager.piece_manager.is_block_empty(piece_index, block_index):
-                    continue
+                # if not self.peer_manager.piece_manager.is_block_empty(piece_index, block_index):
+                    # continue
                     
                 # Update block status to REQUESTED safely
                 self.peer_manager.piece_manager.update_block_status_safe(
@@ -200,14 +202,13 @@ class Bittorrent:
                         
                         # Добавляем keepalive если нужно
                         try:
-                            if time.time() - peer.last_transmission > 60:
+                            if time.time() - peer.last_activity > 60:
                                 request_block += keep_alive.byteStringForKeepAlive()
-                                peer.last_transmission = time.time()
                         except Exception as e:
                             Logger.error(f"Error adding keepalive: {e}")
 
-                        peer.requests_sent += 1
-                        peer.pending_requests += 1
+                        # peer.requests_sent += 1
+                        # peer.pending_requests += 1
                         peer.last_request_time = time.time()
 
                         # Безопасная отправка данных через сокет
@@ -222,7 +223,7 @@ class Bittorrent:
                                 last_requested=time.time()
                             )                            
                         except Exception as sock_error:
-                            peer.pending_requests = max(0, peer.pending_requests - 1)
+                            # peer.pending_requests = max(0, peer.pending_requests - 1)
                             self.peer_manager.piece_manager.update_block_status_safe(
                                 piece_index, block_index, Status.EMPTY
                             )
@@ -236,7 +237,7 @@ class Bittorrent:
                         
                         # Префетч следующих блоков
                         try:
-                            self.peer_manager.prefetch_next_blocks(peer.sock, piece_index, block_index, peer)
+                            self.peer_manager.prefetch_next_blocks(piece_index, block_index, peer)
                         except Exception as e:
                             Logger.error(f"Error prefetching next blocks: {e}")
                         
