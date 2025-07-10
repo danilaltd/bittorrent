@@ -267,7 +267,6 @@ class Bittorrent:
         Logger.info("Torrent Complete")
         Logger.info(f"Total length: {self.tracker.torrent_obj.total_length}")
         self.peer_manager.torrent_completed = True
-
         for url in self.tracker.torrent_obj.announce_list:
             if "http" in url:
                 threading.Thread(target=self.tracker.http_request, args=(url, 'completed')).start()

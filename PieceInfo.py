@@ -577,7 +577,6 @@ class PieceInfo:
                 piece_offset = files_copy[master_i]['pieceOffset']
                 path = files_copy[master_i]['path']
                 if not self.is_piece_complete(piece_index):
-                    master_i += 1
                     continue
                 try:
                     path_to_file = os.path.join(self.torrent.total_path, *path)

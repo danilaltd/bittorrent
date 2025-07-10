@@ -223,12 +223,13 @@ class Piece:
         self._update_status()    
         
     def _update_status(self):
-        if len(self.empty_blocks) == self.number_of_blocks:
-            self.cur_status = Status.EMPTY
         if len(self.downloaded_blocks) == self.number_of_blocks:
             self.cur_status = Status.RECEIVED
-        if self.requested_blocks:
+        elif self.requested_blocks:
             self.cur_status = Status.REQUESTED
+        else:
+            self.cur_status = Status.EMPTY
+        
         
     def getStatus(self):
         return self.cur_status
@@ -240,12 +241,6 @@ class Piece:
                     real_status = block.changeStatusForce(Status.EMPTY)
                     block.last_requested = None
                     self._fix_sets(real_status, block_index)    
-            else:
-                if block.status == Status.REQUESTED:
-                    print(f"not last_requested {self.piece_index}:{block_index}")
-                if block.status == Status.EMPTY:
-                    print(f"empty {self.piece_index}:{block_index}")
-                
                 # else:
                     # print("not time.time() - block.last_requested > timeout:")     
             # else:
