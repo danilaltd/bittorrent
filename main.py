@@ -11,11 +11,54 @@ import os
 import random
 from logger import Logger, timed_lock, print_lock_stats
 
-def main_log(msg, number):
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        log_entry = f'[{timestamp}] {msg}\n'
-        with open(os.path.join('logs', f"main{number}.log"), 'a', encoding='utf-8') as f:
-            f.write(log_entry)
+def log_error(msg, exc=None, flags = None, name = ''):
+    if flags is None:
+        flags = []
+    flags.insert(0, 'ERROR')
+    flags.insert(0, f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    log_entry = f'[{timestamp}] {msg}\n'
+    if exc is not None:
+        if isinstance(exc, ConnectionResetError) or ('10054' in str(exc)):
+            flags.append('Network')
+            log_entry += f'Пир разорвал соединение (обычно для BitTorrent): {msg} — {exc}'
+        else:
+            log_entry = f'{msg}: {exc}'
+    else:
+        log_entry = f'{msg}'
+    log_entry += '\n'
+    res = ''
+    for flag in flags:
+        res += f"[{flag}]"
+    res += ' '    
+    res += log_entry    
+    if name:
+        path = os.path.join('logs', 'main')
+    else:
+        name = 'main.log'
+        path = 'logs'
+        
+    with open(os.path.join(f'{path}', f"{name}"), 'a', encoding='utf-8') as f:
+        f.write(res)
+
+def log_info(msg, flags = None, name = ''):
+    if flags is None:
+        flags = []
+    flags.insert(0, f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    log_entry = f'{msg}\n'
+    res = ''
+    for flag in flags:
+        res += f"[{flag}]"
+    res += ' '    
+    res += log_entry    
+    if name:
+        path = os.path.join('logs', 'main')
+    else:
+        name = 'main.log'
+        path = 'logs'
+        
+    with open(os.path.join(f'{path}', f"{name}"), 'a', encoding='utf-8') as f:
+        f.write(res)
 
 class Bittorrent:
     def __init__(self) -> None:
@@ -82,7 +125,7 @@ class Bittorrent:
                 self.peer_manager.update_optimistic_unchoke()
                 self._download_rarest_first()
             except Exception as e:
-                Logger.error(f"Error in download loop: {e}")
+                log_error(f"Error in download loop: {e}")
                 time.sleep(1)  # Небольшая пауза перед повторной попыткой
         
         # Wait for progress thread to finish
@@ -96,38 +139,41 @@ class Bittorrent:
             threads = []
             i = 0
             # print("append start")
+            sent = False
             for piece_i, peers in min_heap:
                 if i >= self.max_concurrent_blocks:
                     break
                 if not peers:
-                    Logger.info("No peers available. Retrying...")
-                    time.sleep(1)
                     break
                 if not self.peer_manager.piece_manager.is_need_to_download(piece_i):
                     continue
                 i+=1
                 try:
                     self._request_piece_from_peers(piece_i, peers)
+                    sent = True
                     # thread = threading.Thread(target=self._request_piece_from_peers, args=(piece_i, peers))
                     # thread.daemon = True
                     # threads.append(thread)
                 except Exception as e:
-                    Logger.error(f"Error creating thread for piece {piece_i}: {e}")
+                    log_error(f"Error creating thread for piece {piece_i}: {e}")
                     continue
             if threads:
                 for thread in threads:
                     try:
                         thread.start()
                     except Exception as e:
-                        Logger.error(f"Error starting thread: {e}")
+                        log_error(f"Error starting thread: {e}")
                         continue
                 # for thread in threads:
                 #     try:
                 #         thread.join(timeout=30)
                 #     except Exception as e:
                 #         Logger.error(f"Error joining thread: {e}")
+            if not sent:
+                Logger.info("No peers available. Retrying...")
+                time.sleep(1)
         except Exception as e:
-            Logger.error(f"Error in _download_rarest_first: {e}")
+            log_error(f"Error in _download_rarest_first: {e}")
 
     def _request_piece_from_peers(self, piece_index, peers: list[Peer]):
         try:
@@ -139,7 +185,7 @@ class Bittorrent:
             try:
                 peer = self.peer_manager.get_best_peer(available_peers)
             except Exception as e:
-                Logger.error(f"Error getting best peer: {e}")
+                log_error(f"Error getting best peer: {e}")
                 return
             
             if not peer:
@@ -157,13 +203,14 @@ class Bittorrent:
                     Logger.info(f"Selected peer {peer.ip_port} is no longer valid: invalid socket")
                     return
             except Exception as e:
-                Logger.error(f"Error validating selected peer: {e}")
+                log_error(f"Error validating selected peer: {e}")
                 return
             
             self._request_blocks(peer, piece_index)
             
         except Exception as e:
-            Logger.error(f"Error in _request_piece_from_peers for piece {piece_index}: {e}")
+            log_error(f"Error in _request_piece_from_peers for piece {piece_index}: {e}")
+            raise
 
     def _request_blocks(self, peer: Peer, piece_index, max_blocks=16):
         try:
@@ -187,14 +234,14 @@ class Bittorrent:
                         try:
                             request_block = self.peer_manager.request_blockByteString(piece_index, block_index, self.peer_manager.piece_manager.get_block_size(piece_index, block_index))
                         except Exception as e:
-                            Logger.error(f"Error creating request block: {e}")
+                            log_error(f"Error creating request block: {e}")
                             self.peer_manager.piece_manager.update_block_status_safe(
                                 piece_index, block_index, Status.EMPTY
                             )
                             break
                         
                         if not request_block:
-                            Logger.error(f"Failed to create request block for piece {piece_index}, block {block_index}")
+                            log_error(f"Failed to create request block for piece {piece_index}, block {block_index}")
                             self.peer_manager.piece_manager.update_block_status_safe(
                                 piece_index, block_index, Status.EMPTY
                             )
@@ -205,10 +252,10 @@ class Bittorrent:
                             if time.time() - peer.last_activity > 60:
                                 request_block += keep_alive.byteStringForKeepAlive()
                         except Exception as e:
-                            Logger.error(f"Error adding keepalive: {e}")
+                            log_error(f"Error adding keepalive: {e}")
 
-                        # peer.requests_sent += 1
-                        # peer.pending_requests += 1
+                        peer.requests_sent += 1
+                        peer.pending_requests += 1
                         peer.last_request_time = time.time()
 
                         # Безопасная отправка данных через сокет
@@ -223,23 +270,24 @@ class Bittorrent:
                                 last_requested=time.time()
                             )                            
                         except Exception as sock_error:
-                            # peer.pending_requests = max(0, peer.pending_requests - 1)
+                            peer.pending_requests -= 1
                             self.peer_manager.piece_manager.update_block_status_safe(
                                 piece_index, block_index, Status.EMPTY
                             )
-                            Logger.error(f"Socket error for {peer.ip_port}: {sock_error}")
+                            log_error(f"Socket error for {peer.ip_port}: {sock_error}")
                             try:
                                 if self.peer_manager.is_peer_connected(peer):
                                     self.peer_manager._remove_connected_peer(peer)
                             except Exception as e:
-                                Logger.error(f"Error removing peer after socket error: {e}")
+                                log_error(f"Error removing peer after socket error: {e}")
                             break
                         
                         # Префетч следующих блоков
                         try:
                             self.peer_manager.prefetch_next_blocks(piece_index, block_index, peer)
                         except Exception as e:
-                            Logger.error(f"Error prefetching next blocks: {e}")
+                            log_error(f"Error prefetching next blocks: {e}")
+                            raise
                         
 
                 except Exception as e:
@@ -250,11 +298,11 @@ class Bittorrent:
                         if self.peer_manager.is_peer_connected(peer):
                             self.peer_manager._remove_connected_peer(peer)
                     except Exception as remove_error:
-                        Logger.error(f"Error removing peer after exception: {remove_error}")
-                    Logger.error(f"Error requesting block from {peer.ip_port}: {e}")
+                        log_error(f"Error removing peer after exception: {remove_error}")
+                    log_error(f"Error requesting block from {peer.ip_port}: {e}")
                     break
         except Exception as e:
-            Logger.error(f"Error in _request_blocks for peer {peer.ip_port}: {e}")
+            log_error(f"Error in _request_blocks for peer {peer.ip_port}: {e}")
 
     def _update_stats(self):
         try:
@@ -262,7 +310,7 @@ class Bittorrent:
             uploaded = sum(peer.uploaded for peer in self.peer_manager.get_connected_peers_for_stats())
             self.tracker.update_stats(downloaded * BLOCK_SIZE, uploaded)
         except Exception as e:
-            Logger.error(f"Error updating stats: {e}")
+            log_error(f"Error updating stats: {e}")
 
     def _notify_trackers_complete(self):
         Logger.info("Torrent Complete")

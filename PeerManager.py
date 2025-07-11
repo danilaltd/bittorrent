@@ -537,7 +537,7 @@ class PeerManager:
                                 continue
                             piece_index = struct.unpack(">I", piece_index_b)[0]
                             block_offset = struct.unpack(">I", block_offset_b)[0]
-                            # peer.pending_requests = max(0, peer.pending_requests - 1)
+                            peer.pending_requests -= 1
                             # Validate piece index
                             if piece_index >= len(self.piece_manager.pieces):
                                 log_error(f"Invalid piece index {piece_index} from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
@@ -734,13 +734,13 @@ class PeerManager:
                     if len(data) == 68:
                         # Verify handshake response
                         if data[0] != 19 or data[1:20] != b'BitTorrent protocol':
-                            log_error(f"Invalid handshake protocol from {peer.ip_port}")
+                            raise(f"Invalid handshake protocol")
                             break
                             
                         # Verify info hash
                         received_info_hash = data[28:48]
                         if received_info_hash != self.tracker_obj.torrent_obj.info_hash:
-                            log_error(f"Info hash mismatch from {peer.ip_port}")
+                            raise(f"Info hash mismatch")
                             break
                             
                         peer.handshake_received = True
@@ -749,14 +749,14 @@ class PeerManager:
                         break
                         
                 except socket.timeout:
+                    log_error(f"Handshake timeout for {peer.ip_port}")
                     if attempt == 2:  # Last attempt
-                        log_error(f"Handshake timeout for {peer.ip_port}")
                         return
                     time.sleep(1)
                     continue
                 except Exception as e:
+                    log_error(f"Handshake error for {peer.ip_port}", e)
                     if attempt == 2:  # Last attempt
-                        log_error(f"Handshake error for {peer.ip_port}", e)
                         return
                     time.sleep(1)
                     continue
@@ -795,9 +795,9 @@ class PeerManager:
                 
             # Start reading thread
             sock.settimeout(None)  # Remove timeout for continuous reading
-            t = threading.Thread(target=self.read_continously_from_sock, args=(peer,))
-            self._set_item_in_threads(peer, t)
-            t.start()
+            # t = threading.Thread(target=self.read_continously_from_sock, args=(peer,))
+            # self._set_item_in_threads(peer, t)
+            # t.start()
             
             log_info(f"Successfully connected to peer {peer.ip_port}")
             
@@ -816,6 +816,12 @@ class PeerManager:
                     sock.close()
                 except:
                     pass
+        if peer.connected:
+            threading.current_thread().name = "read"
+            self.read_continously_from_sock(peer)
+            # t = threading.Thread(target=self.read_continously_from_sock, args=(peer,))
+            # self._set_item_in_threads(peer, t)
+            # t.start()
 
     def request_blockByteString(self, piece_index, block_index, block_size):
         """Create request message according to BitTorrent protocol"""
@@ -870,13 +876,13 @@ class PeerManager:
                 if not request_block:
                     continue
                     
-                # peer.pending_requests += 1
-                # peer.requests_sent += 1
+                peer.pending_requests += 1
+                peer.requests_sent += 1
                 peer.last_request_time = time.time()
                 
                 # Используем новый метод для безопасной отправки
                 if not peer.send_data(request_block):
-                    # peer.pending_requests = max(0, peer.pending_requests - 1)
+                    peer.pending_requests -= 1
                     raise Exception("Failed to send prefetch request")
                     
                 # Update last_requested safely
@@ -887,6 +893,7 @@ class PeerManager:
                     
         except Exception as e:
             log_error(f"Error requesting next blocks for piece {piece_index}", e)
+            raise
 
     def findRate(self):
         sum = 0
@@ -967,7 +974,7 @@ class PeerManager:
                                 last_request = peer.last_request_time
                                 candidates.append((peer.blocks_recieved, peer))
                             else:
-                                log_info(f"not suitable: {peer.connected}, {peer.peer_choking == 0}")
+                                log_info(f"{peer.ip_port} not suitable: {peer.connected}, {peer.peer_choking == 0}")
 
                         except Exception as e:
                             log_error(f"Error checking peer {peer.ip_port}: {e}", flags=['best_peer'])

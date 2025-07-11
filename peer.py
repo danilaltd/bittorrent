@@ -370,8 +370,9 @@ class Peer:
             return self._pending_requests
     @pending_requests.setter
     def pending_requests(self, value):
-        with timed_lock(self._pending_requests_lock.write_access, "_pending_requests_lock.write_access"):
-            self._pending_requests = value
+        if value >= 0:
+            with timed_lock(self._pending_requests_lock.write_access, "_pending_requests_lock.write_access"):
+                self._pending_requests = value
 
     @property
     def last_request_time(self):
@@ -423,17 +424,17 @@ class Peer:
                 self.send_data(b'\x00\x00\x00\x00')
                 return True
             except (socket.error, OSError) as e:
-                print(f"!!!send test failed: {e}")
+                log_error(f"!!!send test failed: {e}")
                 return False
             except Exception as e:
-                print(f"!!!send test failed2: {e}")
+                log_error(f"!!!send test failed2: {e}")
                 return False
                 
         except (socket.error, OSError, AttributeError) as e:
-            print(f"!!!getpeername failed: {e}")
+            log_error(f"!!!getpeername failed: {e}")
             return False
         except Exception as e:
-                print(f"!!!getpeername failed2: {e}")
+                log_error(f"!!!getpeername failed2: {e}")
                 return False
 
     def connect_to_peer(self):
@@ -578,7 +579,7 @@ class Peer:
                 self.send_data(b'\x00\x00\x00\x00')  # Keepalive message
                 self.last_keepalive = current_time
                 return True
-            except (socket.error, OSError, AttributeError) as e:
+            except Exception as e:
                 log_info(f"Keepalive send failed for {self.ip_port}: {e}")
                 self.connected = False
                 return False
@@ -610,7 +611,8 @@ class Peer:
         except Exception as e:
             log_error(f"Send data failed for {self.ip_port}: {e}")
             self.connected = False
-            return False
+            raise
+            # return False
         
     def peer_score(self):
         # Base score on download rate
