@@ -64,6 +64,8 @@ class Block:
             if self.status != Status.RECEIVED:
                 self.status = Status.REQUESTED
         elif status == Status.RECEIVED:
+            if (self.status == Status.RECEIVED):
+                print("already rec")
             self.status = Status.RECEIVED
         return self.status
     

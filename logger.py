@@ -6,7 +6,20 @@ import functools
 from contextlib import contextmanager
 from datetime import datetime
 
-def log_info(msg, flags = None):
+# def log_info(msg, flags = None):
+#     if flags is None:
+#         flags = []
+#     flags.insert(0, f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+#     log_entry = f'{msg}\n'
+#     res = ''
+#     for flag in flags:
+#         res += f"[{flag}]"
+#     res += ' '    
+#     res += log_entry    
+#     with open(os.path.join('logs', "locks.log"), 'a', encoding='utf-8') as f:
+#         f.write(res)
+
+def log_info(msg, flags = None, name = ''):
     if flags is None:
         flags = []
     flags.insert(0, f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -16,7 +29,13 @@ def log_info(msg, flags = None):
         res += f"[{flag}]"
     res += ' '    
     res += log_entry    
-    with open(os.path.join('logs', "locks.log"), 'a', encoding='utf-8') as f:
+    if name:
+        path = 'logs'
+    else:
+        name = 'locks.log'
+        path = 'logs'
+        
+    with open(os.path.join(f'{path}', f"{name}"), 'a', encoding='utf-8') as f:
         f.write(res)
 
 class Logger:
@@ -26,6 +45,15 @@ class Logger:
     BLUE = '\033[94m'
     END = '\033[0m'
 
+    @staticmethod
+    def measure_time(func, name, *args, **kwargs):
+        start_time = time.perf_counter()  # более точный таймер
+        result = func(*args, **kwargs)
+        end_time = time.perf_counter()
+        elapsed = end_time - start_time
+        log_info(f"{func.__name__}: {1000 * elapsed:.6f} ms", name = f'{name}.log')
+        return result
+    
     @staticmethod
     def error(msg, exc=None):
         if exc is not None:

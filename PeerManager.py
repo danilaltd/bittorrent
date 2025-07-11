@@ -19,6 +19,7 @@ from datetime import datetime
 from logger import timed_lock, lock_decorator, print_lock_stats
 from rwlock import RWLock
 import traceback
+from logger import Logger
 
 MAX_CONNECTED_PEER = 50
 MIN_PEER_UPDATE_INTERVAL = 3
@@ -406,10 +407,11 @@ class PeerManager:
             disconnected_peers = [p for p in self.peers if p not in self.connected_peers and p.connection_attempts < p.max_connection_attempts]
             if disconnected_peers:
                 log_info(f"Attempting to reconnect to {len(disconnected_peers)} peers...")
-                def peer_value(peer: Peer):
-                    needed_pieces = sum(1 for i in range(self.piece_manager.number_of_pieces) if not self.piece_manager.is_piece_complete(i) and peer.bit_field[i])
-                    return needed_pieces
-                sorted_peers = sorted(disconnected_peers, key=peer_value, reverse=True)
+                # def peer_value(peer: Peer):
+                    # needed_pieces = sum(1 for i in range(self.piece_manager.number_of_pieces) if not self.piece_manager.is_piece_complete(i) and peer.bit_field[i])
+                    # return needed_pieces
+                # sorted_peers = sorted(disconnected_peers, key=peer_value, reverse=True)
+                sorted_peers = disconnected_peers
                 for peer in sorted_peers:
                     if self._get_connected_peers_count() >= MAX_CONNECTED_PEER:
                         break
@@ -443,15 +445,23 @@ class PeerManager:
     def read_continously_from_sock(self, peer: Peer):
         if self._get_connected_peers_count() >= MAX_CONNECTED_PEER:
             return
-                
+        start = time.perf_counter()
         try:
             while True:
+                cur = time.perf_counter()
+                dur = (cur - start) * 1000
+                log_info(f"loop, waiting time: {dur} ms", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                start = cur
                 try:
+                    # if not peer.sock or not peer.connected or Logger.measure_time(peer.check_inactivity, "_1"):
                     if not peer.sock or not peer.connected or peer.check_inactivity():
                         log_error(f"Invalid socket or peer state for {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
                         break
+                    
+                    
 
                     message_length = self._read_bytes_from_sock(4, peer)
+                    # message_length = Logger.measure_time(self._read_bytes_from_sock, "_2", 4, peer)
                     
                     if not message_length:
                         log_error(f"Invalid message length from {peer.ip_port}: {len(message_length)}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
@@ -464,6 +474,7 @@ class PeerManager:
                         continue
                         
                     message_ID = self._read_bytes_from_sock(1, peer)
+                    # message_ID = Logger.measure_time(self._read_bytes_from_sock, "_3", 1, peer)
                     if not message_ID:
                         log_error(f"Invalid message ID from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
                         continue
@@ -486,6 +497,7 @@ class PeerManager:
                     elif message_ID_u == 4:  # Have
                         if message_length - 1 == 4:
                             piece_index = self._read_bytes_from_sock(4, peer)
+                            # piece_index = Logger.measure_time(self._read_bytes_from_sock, "_4", 4, peer)
                             if piece_index:
                                 piece_index = struct.unpack(">I", piece_index)[0]
                             else:
@@ -502,8 +514,8 @@ class PeerManager:
                                 
                     elif message_ID_u == 5:  # Bitfield
                         bitfield_length = message_length - 1
-                        # bitfield_data = sock.recv(bitfield_length)
                         bitfield_data = self._read_bytes_from_sock(bitfield_length, peer)
+                        # bitfield_data = Logger.measure_time(self._read_bytes_from_sock, "_5", bitfield_length, peer)
                         
                         if bitfield_data:
                             if len(bitfield_data) == bitfield_length:
@@ -518,6 +530,7 @@ class PeerManager:
                     elif message_ID_u == 6:  # Request
                         log_info(f"Received request from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
                         data = self._read_bytes_from_sock(12, peer)
+                        # data = Logger.measure_time(self._read_bytes_from_sock, "_6", 12, peer)
                         if data:
                             pass
                         else:
@@ -528,10 +541,12 @@ class PeerManager:
                     elif message_ID_u == 7:  # Piece
                         try:
                             piece_index_b = self._read_bytes_from_sock(4, peer)
+                            # piece_index_b = Logger.measure_time(self._read_bytes_from_sock, "_7", 4, peer)
                             if not piece_index_b:
                                 log_error(f"Invalid piece_index_b from {peer.ip_port}: {piece_index_b}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
                                 continue
                             block_offset_b = self._read_bytes_from_sock(4, peer)
+                            # block_offset_b = Logger.measure_time(self._read_bytes_from_sock, "_8", 4, peer)
                             if not block_offset_b:
                                 log_error(f"Invalid piece_index_b from {peer.ip_port}: {block_offset_b}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
                                 continue
@@ -539,7 +554,7 @@ class PeerManager:
                             block_offset = struct.unpack(">I", block_offset_b)[0]
                             peer.pending_requests -= 1
                             # Validate piece index
-                            if piece_index >= len(self.piece_manager.pieces):
+                            if piece_index >= self.piece_manager.number_of_pieces:
                                 log_error(f"Invalid piece index {piece_index} from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
                                 continue
                                 
@@ -556,21 +571,24 @@ class PeerManager:
                             #     continue
                             
                             block_data = self._read_bytes_from_sock(message_length - 9, peer)
+                            # block_data = Logger.measure_time(self._read_bytes_from_sock, "_9", message_length - 9, peer)
                             if block_data is None:
                                 log_error(f"Invalid piece {piece_index} from {peer.ip_port}: couldn't read data", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
                                 continue
                                 
                             # Update block status safely
-                            # print(f"read sock got piece {piece_index}")
                             log_info(f"{peer.ip_port}: update {piece_index}:{block_index}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
 
                             if self.piece_manager.update_block_status_safe(piece_index, block_index, Status.RECEIVED, block_data):
+                            # if Logger.measure_time(self.piece_manager.update_block_status_safe, "_10", piece_index, block_index, Status.RECEIVED, block_data):
                             
                                 peer.blocks_recieved += 1
                                                                                 
                                 # Request next block if piece is not complete
-                                if self.piece_manager.is_piece_empty(piece_index):
-                                    self._request_next_block(piece_index, peer)
+                                # if self.piece_manager.is_piece_empty(piece_index):
+                                # if Logger.measure_time(self.piece_manager.is_piece_empty, "_11", piece_index):
+                                self.prefetch_next_blocks(piece_index, peer)
+                                    # Logger.measure_time(self.prefetch_next_blocks, "_12", piece_index, peer)
                             
                             # print(f"read sock wrote {piece_index}")
                                 
@@ -605,36 +623,6 @@ class PeerManager:
                 peer.sock.close()
             except:
                 pass
-
-    def _request_next_block(self, piece_index, peer: Peer):
-        """Request next block from the same piece"""
-        try:
-            # piece_index = piece.piece_index
-            # Validate piece and peer state
-            if not peer or peer.peer_choking:
-                return
-                
-            blocks = self.piece_manager.get_empty_blocks(piece_index)
-            if blocks:
-                block_index = blocks[0]
-            else:
-                block_index = None
-                    
-            if block_index is None:
-                return
-                
-            # Send request
-            request_block = self.request_blockByteString(piece_index, block_index, self.piece_manager.get_block_size(piece_index, block_index))
-            if request_block:
-                peer.send_data(request_block)
-                # Update last_requested safely
-                self.piece_manager.update_block_status_safe(
-                    piece_index, block_index, Status.REQUESTED, 
-                    last_requested=time.time()
-                )
-                
-        except Exception as e:
-            log_error(f"Error requesting next block for piece {piece_index}, \n{traceback.format_exc()}", e)
 
     @staticmethod
     def _read_bytes_from_sock(length: int, peer: Peer):
@@ -841,38 +829,13 @@ class PeerManager:
             log_error(f"Error creating request message for piece {piece_index}, block {block_index}", e)
             return None
 
-    def prefetch_next_blocks(self, piece_index, current_block_index, peer):
+    def prefetch_next_blocks(self, piece_index, peer: Peer, available_requests = 32):
         """Request next blocks from the same piece following BitTorrent protocol"""
-        try:
-            # Validate inputs
-            blocks_len = self.piece_manager.get_blocks_len(piece_index)
-            if not peer or peer.peer_choking:
-                return
-            if current_block_index < 0 or current_block_index >= blocks_len:
-                log_error(f"Invalid current block index {current_block_index} for piece {piece_index}")
-                return
-                
-            # Get piece safely
-            # if not piece_safe:
-                # return
-                
-            # Calculate how many blocks we can request (protocol limit)
-            max_requests = 5  # Standard BitTorrent limit
-            available_requests = max_requests
-            # available_requests = max_requests - len([b for b in piece_safe.blocks if b.last_requested])
-            
-            if available_requests <= 0:
-                return
-                
-            # Request next blocks in order
-            empty_blocks_sorted = sorted(self.piece_manager.get_empty_blocks(piece_index))
-            i = 0
-            while i < len(empty_blocks_sorted) and empty_blocks_sorted[i] <= current_block_index:
-                i += 1
-            empty_blocks = empty_blocks_sorted[i:i + available_requests]
-            for next_block_index in empty_blocks:
-                
-                request_block = self.request_blockByteString(piece_index, next_block_index, self.piece_manager.get_block_size(piece_index, next_block_index))
+        empty_blocks = self.piece_manager.get_empty_blocks(piece_index)
+        empty_blocks = empty_blocks[:available_requests]
+        for block_index in empty_blocks:
+            try:
+                request_block = self.request_blockByteString(piece_index, block_index, self.piece_manager.get_block_size(piece_index, block_index))
                 if not request_block:
                     continue
                     
@@ -880,20 +843,30 @@ class PeerManager:
                 peer.requests_sent += 1
                 peer.last_request_time = time.time()
                 
-                # Используем новый метод для безопасной отправки
-                if not peer.send_data(request_block):
+                try:
+                    if not peer.send_data(request_block):
+                        raise Exception("Failed to send data to peer")
+                    
+                    self.piece_manager.update_block_status_safe(
+                        piece_index, block_index, Status.REQUESTED,
+                        last_requested=time.time()
+                    )                            
+                except Exception as sock_error:
                     peer.pending_requests -= 1
-                    raise Exception("Failed to send prefetch request")
+                    self.piece_manager.update_block_status_safe(
+                        piece_index, block_index, Status.EMPTY
+                    )
+                    log_error(f"Socket error for {peer.ip_port}: {sock_error}")
+                    try:
+                        if self.is_peer_connected(peer):
+                            self._remove_connected_peer(peer)
+                    except Exception as e:
+                        log_error(f"Error removing peer after socket error: {e}")
+                    break
                     
-                # Update last_requested safely
-                self.piece_manager.update_block_status_safe(
-                    piece_index, next_block_index, Status.REQUESTED,
-                    last_requested=time.time()
-                )
-                    
-        except Exception as e:
-            log_error(f"Error requesting next blocks for piece {piece_index}", e)
-            raise
+            except Exception as e:
+                log_error(f"Error requesting next block: {piece_index}:{block_index}", e)
+                raise
 
     def findRate(self):
         sum = 0

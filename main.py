@@ -145,8 +145,8 @@ class Bittorrent:
                     break
                 if not peers:
                     break
-                if not self.peer_manager.piece_manager.is_need_to_download(piece_i):
-                    continue
+                # if not self.peer_manager.piece_manager.is_need_to_download(piece_i):
+                    # continue
                 i+=1
                 try:
                     self._request_piece_from_peers(piece_i, peers)
@@ -206,103 +206,11 @@ class Bittorrent:
                 log_error(f"Error validating selected peer: {e}")
                 return
             
-            self._request_blocks(peer, piece_index)
+            self.peer_manager.prefetch_next_blocks(piece_index, peer)
             
         except Exception as e:
             log_error(f"Error in _request_piece_from_peers for piece {piece_index}: {e}")
             raise
-
-    def _request_blocks(self, peer: Peer, piece_index, max_blocks=16):
-        try:
-            empty_blocks = sorted(self.peer_manager.piece_manager.get_empty_blocks(piece_index))[:max_blocks]
-            for block_index in empty_blocks:
-            # for block_index in range(min(max_blocks, self.peer_manager.piece_manager.get_blocks_len(piece_index))):
-                # Get piece safely to check block status
-                
-                # if not self.peer_manager.piece_manager.is_block_empty(piece_index, block_index):
-                    # continue
-                    
-                # Update block status to REQUESTED safely
-                self.peer_manager.piece_manager.update_block_status_safe(
-                    piece_index, block_index, Status.REQUESTED
-                )
-                
-                try:
-                    with timed_lock(self.semaphore, "concurrent_blocks_semaphore"):
-                        # Получаем запрос на блок
-                        request_block = None
-                        try:
-                            request_block = self.peer_manager.request_blockByteString(piece_index, block_index, self.peer_manager.piece_manager.get_block_size(piece_index, block_index))
-                        except Exception as e:
-                            log_error(f"Error creating request block: {e}")
-                            self.peer_manager.piece_manager.update_block_status_safe(
-                                piece_index, block_index, Status.EMPTY
-                            )
-                            break
-                        
-                        if not request_block:
-                            log_error(f"Failed to create request block for piece {piece_index}, block {block_index}")
-                            self.peer_manager.piece_manager.update_block_status_safe(
-                                piece_index, block_index, Status.EMPTY
-                            )
-                            break
-                        
-                        # Добавляем keepalive если нужно
-                        try:
-                            if time.time() - peer.last_activity > 60:
-                                request_block += keep_alive.byteStringForKeepAlive()
-                        except Exception as e:
-                            log_error(f"Error adding keepalive: {e}")
-
-                        peer.requests_sent += 1
-                        peer.pending_requests += 1
-                        peer.last_request_time = time.time()
-
-                        # Безопасная отправка данных через сокет
-                        try:
-                            # Используем новый метод для безопасной отправки
-                            if not peer.send_data(request_block):
-                                raise Exception("Failed to send data to peer")
-                            
-                            # Update last_requested safely (вне блокировки peer)
-                            self.peer_manager.piece_manager.update_block_status_safe(
-                                piece_index, block_index, Status.REQUESTED,
-                                last_requested=time.time()
-                            )                            
-                        except Exception as sock_error:
-                            peer.pending_requests -= 1
-                            self.peer_manager.piece_manager.update_block_status_safe(
-                                piece_index, block_index, Status.EMPTY
-                            )
-                            log_error(f"Socket error for {peer.ip_port}: {sock_error}")
-                            try:
-                                if self.peer_manager.is_peer_connected(peer):
-                                    self.peer_manager._remove_connected_peer(peer)
-                            except Exception as e:
-                                log_error(f"Error removing peer after socket error: {e}")
-                            break
-                        
-                        # Префетч следующих блоков
-                        try:
-                            self.peer_manager.prefetch_next_blocks(piece_index, block_index, peer)
-                        except Exception as e:
-                            log_error(f"Error prefetching next blocks: {e}")
-                            raise
-                        
-
-                except Exception as e:
-                    self.peer_manager.piece_manager.update_block_status_safe(
-                        piece_index, block_index, Status.EMPTY
-                    )
-                    try:
-                        if self.peer_manager.is_peer_connected(peer):
-                            self.peer_manager._remove_connected_peer(peer)
-                    except Exception as remove_error:
-                        log_error(f"Error removing peer after exception: {remove_error}")
-                    log_error(f"Error requesting block from {peer.ip_port}: {e}")
-                    break
-        except Exception as e:
-            log_error(f"Error in _request_blocks for peer {peer.ip_port}: {e}")
 
     def _update_stats(self):
         try:
@@ -357,7 +265,9 @@ if __name__ == "__main__":
     # torrent = sys.argv[1]
     # path = sys.argv[2]
 
-    torrent = r'.\torrents\music.torrent'
-    path = r"./down"
+    # torrent = r'.\torrents\music.torrent'
+    # path = r"./down"
+    torrent = os.path.join('torrents', 'music.torrent')
+    path = os.path.join('.', 'down')
     b = Bittorrent()
     b.start_downloading(torrent, path)

@@ -9,7 +9,7 @@ import os
 from itertools import groupby
 import datetime
 from datetime import datetime
-from logger import timed_lock, lock_decorator, print_lock_stats
+from logger import timed_lock, lock_decorator, print_lock_stats, Logger
 from peer import Peer
 from rwlock import RWLock
 import threading
@@ -113,11 +113,10 @@ class PieceInfo:
             self._statuses = value
             
     def _set_status(self, index: int, new_status: Status):
-        with timed_lock(self._statuses_lock.write_access, "_statuses_lock.write_access"):
-            old_status = self._statuses[index]
-            if old_status is new_status:
-                return  # ничего не менялось
-            self._statuses[index] = new_status
+        old_status = self._statuses[index]
+        if old_status is new_status:
+            return
+        self._statuses[index] = new_status
             
 
         if old_status is Status.EMPTY:
@@ -319,9 +318,9 @@ class PieceInfo:
         if peers is not None:
             out += self._peer_stats_string_internal(peers)   
         
-        matrix_data = self._get_pieces_matrix_safe()
-        if print_matrix and matrix_data:
-            out += self._matrix_string_internal(matrix_data)
+        # matrix_data = self._get_pieces_matrix_safe()
+        # if print_matrix and matrix_data:
+        #     out += self._matrix_string_internal(matrix_data)
         
         try:
             os.makedirs('logs', exist_ok=True)
@@ -588,8 +587,11 @@ class PieceInfo:
 
     def update_block_status_safe(self, piece_index, block_index, status: Status, data=None, last_requested=None):
         piece: Piece = self.get_piece_safe(piece_index)
+        # piece: Piece = Logger.measure_time(self.get_piece_safe, "^1", piece_index)
         if piece:
             piece_status, fix_blocks = piece.changeStatus(block_index, status, data, last_requested)
+            # piece_status, fix_blocks = Logger.measure_time(piece.changeStatus, "^2",block_index, status, data, last_requested)
+            # Logger.measure_time(self._fix_sets, "^3", piece_status, piece_index)
             self._fix_sets(piece_status, piece_index)
             if fix_blocks != 0:
                 self.downloaded_blocks += fix_blocks
@@ -601,16 +603,32 @@ class PieceInfo:
         self._queue.put((piece_index, piece_status))
 
     def _worker_loop(self):
+        # while True:
+        #     index, new_status = self._queue.get()
+        #     try:
+        #         self._set_status(index, new_status)
+        #         # Logger.measure_time(self._set_status, "^0", index, new_status)
+        #     finally:
+        #         self._queue.task_done()
+        
         while True:
-            index, new_status = self._queue.get()
-            try:
-                self._set_status(index, new_status)
-            finally:
-                self._queue.task_done()
+            with timed_lock(self._statuses_lock.write_access, "_statuses_lock.write_access"):
+                while True:
+                    try:
+                        index, new_status = self._queue.get_nowait()
+                    except:
+                        break
+                    try:
+                        self._set_status(index, new_status)
+                    finally:
+                        self._queue.task_done()
 
 
 
     def write_into_file_safe(self):
+        while True:
+            time.sleep(100)
+            pass
         files_copy = self.files.copy()
         master_i = 0
         n = len(files_copy)
