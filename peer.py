@@ -7,6 +7,12 @@ import os
 from logger import timed_lock
 from rwlock import RWLock
 import traceback
+import queue
+import threading
+import errno
+import struct
+import traceback
+import selectors
 
 def RoundUp(x):
     return ((x + 7) & (-8))
@@ -17,24 +23,12 @@ def validIPAddress(IP: str) -> str:
     except ValueError:
         return "Invalid"
     
-def log_info(msg, flags = None):
-    if flags is None:
-        flags = []
-    flags.insert(0, f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    log_entry = f'{msg}\n'
-    res = ''
-    for flag in flags:
-        res += f"[{flag}]"
-    res += ' '    
-    res += log_entry    
-    with open(os.path.join('logs', "peer.log"), 'a', encoding='utf-8') as f:
-        f.write(res)
-        
-def log_error(msg, exc=None, flags = None):
+def log_error(msg, exc=None, flags = None, name = ''):
     if flags is None:
         flags = []
     flags.insert(0, 'ERROR')
-    flags.insert(0, f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    now = datetime.now()
+    flags.insert(0, f"{now.strftime('%Y-%m-%d %H:%M:%S')}.{now.microsecond // 1000:03d}")
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     log_entry = f'[{timestamp}] {msg}\n'
     if exc is not None:
@@ -51,12 +45,38 @@ def log_error(msg, exc=None, flags = None):
         res += f"[{flag}]"
     res += ' '    
     res += log_entry    
-    with open(os.path.join('logs', "peer.log"), 'a', encoding='utf-8') as f:
+    if name:
+        path = os.path.join('logs', 'peermanager')
+    else:
+        name = 'peer.log'
+        path = 'logs'
+        
+    with open(os.path.join(f'{path}', f"{name}"), 'a', encoding='utf-8') as f:
+        f.write(res)
+
+def log_info(msg, flags = None, name = ''):
+    if flags is None:
+        flags = []
+    now = datetime.now()
+    flags.insert(0, f"{now.strftime('%Y-%m-%d %H:%M:%S')}.{now.microsecond // 1000:03d}")
+    log_entry = f'{msg}\n'
+    res = ''
+    for flag in flags:
+        res += f"[{flag}]"
+    res += ' '    
+    res += log_entry    
+    if name:
+        path = os.path.join('logs', 'peermanager')
+    else:
+        name = 'peer.log'
+        path = 'logs'
+        
+    with open(os.path.join(f'{path}', f"{name}"), 'a', encoding='utf-8') as f:
         f.write(res)
 
 class Peer:
     def __init__(self, ip_port, number_of_pieces):
-        self._sock = None
+        self._sock: socket.socket = None
         self._sock_lock = RWLock("_sock_lock")
         self._bit_field = bitstring.BitArray(RoundUp(number_of_pieces))
         self._bit_field_lock = RWLock("_bit_field_lock")
@@ -118,7 +138,128 @@ class Peer:
         self._bad_peer_lock = RWLock("_bad_peer_lock")
         self._connecting = False
         self._connecting_lock = RWLock("_connecting_lock")
+        
+        self._socket_worker = None
+        
+        self.selector = selectors.DefaultSelector()
+        self.send_buf = bytearray()
+        self.send_queue = queue.Queue()
+        self.receive_queue = queue.Queue()
+        self.send_view = None
+        self.recv_buf = bytearray()
 
+    def launch_socket_thread(self):
+        self._socket_worker = threading.Thread(target=self._socket_worker_loop, daemon=True)
+        self._socket_worker.start()
+
+    def _socket_worker_loop(self):
+        self.sock.setblocking(False)
+        self.selector.register(self.sock, selectors.EVENT_READ | selectors.EVENT_WRITE)
+        while self.connected:
+            print(f"send: {self.send_queue.qsize()}; rec: {self.receive_queue.qsize()}")
+            events = self.selector.select(timeout=1)
+            for key, mask in events:
+                if mask & selectors.EVENT_READ:
+                    self._handle_read()
+                if mask & selectors.EVENT_WRITE:
+                    self._handle_write()
+            
+    def _handle_write(self):
+        """Send as much data from send_buf and send_queue as socket allows."""
+        # Refill send_buf if empty and no current view
+        if self.send_view is None:
+            while not self.send_buf:
+                try:
+                    chunk = self.send_queue.get_nowait()
+                    self.send_buf.extend(chunk)
+                except queue.Empty:
+                    break
+            if self.send_buf:
+                self.send_view = memoryview(self.send_buf)
+
+        if self.send_view:
+            try:
+                sent = self.sock.send(self.send_view)
+                if sent > 0:
+                    self.send_view = self.send_view[sent:]
+                    if len(self.send_view) == 0:
+                        self.send_view = None
+                        self.send_buf.clear()
+                else:
+                    self.connected = False
+                    log_error(f"sent == 0")
+            except BlockingIOError:
+                pass
+            except Exception as e:
+                log_error(f"Fatal in _handle_write {e}, \nTraceback:\n{traceback.format_exc()}")
+                self.connected = False
+
+    def _handle_read(self):
+        try:
+            data = self.sock.recv(8192)
+            if not data:
+                # connection closed by peer
+                self.close()
+                return
+            self.recv_buf.extend(data)
+
+            # parse complete messages: 4-byte big-endian length + payload
+            offset = 0
+            while len(self.recv_buf) - offset >= 4:
+                length = struct.unpack_from('>I', self.recv_buf, offset)[0]
+                if len(self.recv_buf) - offset < 4 + length:
+                    break
+                start = offset + 4
+                end = start + length
+                msg = bytes(self.recv_buf[offset:end])
+                self.receive_queue.put(self.recv_buf[offset:end])
+                offset = end
+
+            # remove parsed bytes
+            if offset > 0:
+                del self.recv_buf[:offset]
+
+        except BlockingIOError:
+            pass
+        except Exception as e:
+            traceback.print_exc()
+            self.close()
+
+    def _recv_exact(self, nbytes: int) -> bytes:
+        """Receive exactly nbytes or return None if failed/closed."""
+        buf = bytearray()
+        start = time.time()
+        timeout = 10
+        while len(buf) < nbytes:
+            # Use selector to wait for read availability
+            events = self.selector.select(timeout=timeout)
+            if not events:
+                log_error("not events")
+                return None
+            try:
+                chunk = self.sock.recv(nbytes - len(buf))
+                if not chunk:
+                    log_error("not chunk")
+                    return None
+                buf.extend(chunk)
+            except BlockingIOError:
+                continue
+            except Exception as e:
+                log_error(f"Exception: {e}")
+                return None
+            # Timeout check
+            if time.time() - start > timeout:
+                log_error(f"timeout")
+                return None
+        return bytes(buf)
+    
+    def getMessage(self):
+        try:
+            data = self.receive_queue.get_nowait()   
+            return data
+        except: 
+            return None
+    
     @property
     def sock(self):
         with timed_lock(self._sock_lock.read_access, "_sock_lock.read_access"):
@@ -421,7 +562,7 @@ class Peer:
             # Проверяем, что можем отправить данные
             try:
                 # Используем MSG_DONTWAIT для неблокирующей проверки
-                self.send_data(b'\x00\x00\x00\x00')
+                self._send_data(b'\x00\x00\x00\x00')
                 return True
             except (socket.error, OSError) as e:
                 log_error(f"!!!send test failed: {e}")
@@ -442,6 +583,10 @@ class Peer:
         current_time = time.time()
         if current_time - self.last_connection_attempt < self.connection_cooldown:
             return None
+        
+        if not (0 < self.port < 65536):
+                log_info(f"Invalid port number {self.port} for {self.ip}")
+                return None
 
         # Получаем блокировку только для обновления состояния
         if current_time - self.last_connection_attempt < self.connection_cooldown:
@@ -463,27 +608,24 @@ class Peer:
         # Создаем новый сокет и подключаемся (сетевые операции без блокировки)
         try:
             if validIPAddress(self.ip) == "IPv6":
+                log_info(f"{self.ip} is v6")
                 sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
                 ip_port = (self.ip, self.port, 0, 0)
             else:
+                log_info(f"{self.ip} is v4")
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                # sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5) 
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)  
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 131072) 
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 131072)  
+                # sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                # sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+                # sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5) 
+                # sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)  
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024 * 1024) 
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024 * 1024)  
                 ip_port = (self.ip, self.port)
 
             log_info(f"Attempting connection to {ip_port}")
             sock.settimeout(self.connection_timeout)
-            
-            if not (0 < self.port < 65536):
-                log_info(f"Invalid port number {self.port} for {self.ip}")
-                sock.close()
-                return None
                 
             sock.connect(ip_port)
             
@@ -498,6 +640,7 @@ class Peer:
                 return None
             
             # Обновляем состояние под блокировкой (быстрая операция)
+            sock.setblocking(False)
             current_time = time.time()
             self.sock = sock
             self.ip_port = ip_port
@@ -509,7 +652,7 @@ class Peer:
             self.handshake_sent = False
             self.handshake_received = False
             
-            log_info(f"Success {ip_port}")
+            log_info(f"Successfull connection to {ip_port}")
             return sock
             
         except socket.timeout:
@@ -544,6 +687,7 @@ class Peer:
             return None
 
     def close(self):
+        print("close")
         # Закрываем сокет без блокировки
         sock_to_close = None
         if self.sock:
@@ -576,7 +720,7 @@ class Peer:
                     self.connected = False
                     return False
                     
-                self.send_data(b'\x00\x00\x00\x00')  # Keepalive message
+                self._send_data(b'\x00\x00\x00\x00')  # Keepalive message
                 self.last_keepalive = current_time
                 return True
             except Exception as e:
@@ -601,6 +745,12 @@ class Peer:
         self.last_activity = current_time
         
     def send_data(self, data):
+        self.send_queue.put(data)
+        mask = selectors.EVENT_READ | selectors.EVENT_WRITE
+        self.selector.modify(self.sock, mask)
+        return True
+            
+    def _send_data(self, data):
         try:
             if not self.connected or not self.sock:
                 raise Exception(f"not self.connected or not self.sock: {self.connected} {not not self.sock}")
@@ -613,6 +763,79 @@ class Peer:
             self.connected = False
             raise
             # return False
+        
+    def _read_message(self):
+        try:
+            data = self._read_bytes_from_sock(4, empty_ok=True)
+            if not data: 
+                raise EOFError("no data")
+            message_length = struct.unpack(">I", data)[0]
+            if message_length:
+                data_1 = self._read_bytes_from_sock(message_length)
+                if data_1:
+                    data += data_1
+                else:
+                    raise Exception(f"req len: {message_length}, got none")
+            return data
+        except EOFError:
+            return None
+        except Exception as e:
+            log_error(f"{self.ip}: err in _read_message: {e}, \nTraceback:\n{traceback.format_exc()}")
+            return None
+    
+        
+    def _read_bytes_from_sock(self, length: int, empty_ok = False):
+        self.update_activity()
+        if length < 0:
+            log_error(f"Invalid piece data length {length} from {self.ip_port}", flags=['piece Reading'], name=f'{self.ip_port}({threading.current_thread().name}).log')
+            return None
+            
+        data = b''
+        required = length
+        timeout = 10  # 1 seconds timeout for reading piece data
+        start_time = time.time()
+            
+        while required > 0:
+            try:
+                if time.time() - start_time > timeout:
+                    log_error(f"Timeout reading piece data from {self.ip_port}", flags=['piece Reading'], name=f'{self.ip_port}({threading.current_thread().name}).log')
+                    return None
+                    
+                # start = time.time()
+                buff = self.sock.recv(min(required, 65536))  # Increased buffer size to 64KB
+                # end = time.time()
+                
+                if buff and len(buff) > 0:
+                    # self.rate = len(buff) // 125
+                    # self.rate = self.rate // (end - start) if (end - start) > 0 else 0
+                    data += buff
+                    required = length - len(data)
+                    
+            except socket.error as e:
+                err = e.args[0]
+                if err != errno.EAGAIN and err != errno.EWOULDBLOCK:
+                    log_error(f"Socket error reading piece data from {self.ip_port}, \nTraceback:\n{traceback.format_exc()}", e, flags=['piece Reading'], name=f'{self.ip_port}({threading.current_thread().name}).log')
+                    if len(data) == 0:
+                        return None
+                    else:
+                        raise
+                if empty_ok and len(data) == 0:
+                    return None
+                
+                log_error(f"wait", name=f'{self.ip_port}({threading.current_thread().name}).log')
+                continue
+            except Exception as e:
+                log_error(f"Error reading piece data from {self.ip_port}", e, flags=['piece Reading'], name=f'{self.ip_port}({threading.current_thread().name}).log')
+                if len(data) == 0:
+                    return None
+                else:
+                    raise
+                
+        if len(data) != length:
+            log_error(f"Received incomplete piece data from {self.ip_port}: got {len(data)} bytes, expected {length}", flags=['piece Reading'], name=f'{self.ip_port}({threading.current_thread().name}).log')
+            return None
+            
+        return data
         
     def peer_score(self):
         # Base score on download rate

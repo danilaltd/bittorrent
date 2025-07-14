@@ -313,7 +313,7 @@ class PieceInfo:
         # Calculate download speed
         out = ""
         out += f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n'
-        out += self._progress_bar_string_internal(decimals, suffix) 
+        out += self._progress_bar_string_internal(decimals, suffix, peers) 
         
         if peers is not None:
             out += self._peer_stats_string_internal(peers)   
@@ -330,13 +330,16 @@ class PieceInfo:
         except Exception as e:
             print(f'error in status: {e}')
 
-    def _progress_bar_string_internal(self, decimals, suffix):
+    def _progress_bar_string_internal(self, decimals, suffix, peers):
         """Internal method for progress bar string without locks"""
         total = self.totalBlocks
         current_time = time.time()
         time_diff = current_time - self.last_update_time
         if time_diff >= 0.5:
-            blocks_done = self.downloaded_blocks
+            if peers:
+                blocks_done = peers[0].blocks_recieved
+            else:
+                blocks_done = self.downloaded_blocks
             current_bytes = blocks_done * BLOCK_SIZE
             bytes_diff = current_bytes - self.last_bytes_done
             
@@ -435,7 +438,8 @@ class PieceInfo:
                 # strings.append(f"Pieces: {available:<4}")
                 strings.append(f"Blocks: {peer.blocks_recieved:<4}")
                 strings.append(f"Connections: {peer.requests_sent:<3}")
-                strings.append(f"Pending: {peer.pending_requests:<3}")
+                # strings.append(f"Pending: {peer.pending_requests:<3}")
+                strings.append(f"Pending: {peer.requests_sent - peer.blocks_recieved:<3}")
                 strings.append(f"Bad: {'+' if peer.bad_peer else '-':<5}")
                 strings.append(f"Unchocked: {'+' if not peer.peer_choking else '-':<5}")
                 table += ' '.join(strings) + '\n'

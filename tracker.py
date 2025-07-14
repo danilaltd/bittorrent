@@ -34,6 +34,7 @@ class Tracker:
     def __init__(self, torrent_path, file_path):
         self.torrent_obj = Torrent(torrent_path, file_path) 
         self.peers: set[tuple [str, str]] = set()
+        self.peers.add(('5.79.98.162', 53916))
         self.tracker_threads = []
         self.tracker_update_thread = None
         self.downloaded = 0

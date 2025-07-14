@@ -4,11 +4,32 @@ from enum import Enum
 from rwlock import RWLock
 from rwlock import timed_lock
 import time
+import os
+from datetime import datetime
 
 class Status(Enum):
     EMPTY = 0
     REQUESTED = 1
     RECEIVED = 2
+
+def log_info(msg, flags = None, name = ''):
+    if flags is None:
+        flags = []
+    flags.insert(0, f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    log_entry = f'{msg}\n'
+    res = ''
+    for flag in flags:
+        res += f"[{flag}]"
+    res += ' '    
+    res += log_entry    
+    if name:
+        path = os.path.join('logs', 'peermanager')
+    else:
+        name = 'blockandpiece.log'
+        path = 'logs'
+        
+    with open(os.path.join(f'{path}', f"{name}"), 'a', encoding='utf-8') as f:
+        f.write(res)
 
 class Block:
     def __init__(self, block_size = BLOCK_SIZE, raw_bytes = b""):
@@ -61,11 +82,15 @@ class Block:
         if status == Status.EMPTY:
             pass
         elif status == Status.REQUESTED:
+            if (self.status == Status.REQUESTED):
+                log_info("already requested")
             if self.status != Status.RECEIVED:
                 self.status = Status.REQUESTED
+            else:
+                log_info("try chenge rec to req")
         elif status == Status.RECEIVED:
             if (self.status == Status.RECEIVED):
-                print("already rec")
+                log_info("already rec")
             self.status = Status.RECEIVED
         return self.status
     

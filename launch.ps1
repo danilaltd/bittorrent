@@ -1,0 +1,1 @@
+wsl bash -c "source venv/bin/activate && python main.py"

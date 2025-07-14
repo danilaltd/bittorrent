@@ -8,7 +8,6 @@ import threading
 import socket
 from Messages import *
 from PieceInfo import PieceInfo
-import errno
 import socket
 import time
 import random
@@ -25,7 +24,7 @@ MAX_CONNECTED_PEER = 50
 MIN_PEER_UPDATE_INTERVAL = 3
 DEFAULT_PEER_UPDATE_INTERVAL = 30
 MIN_PIECE_UPDATE_INTERVAL = 3
-DEFAULT_PIECE_UPDATE_INTERVAL = 60
+DEFAULT_PIECE_UPDATE_INTERVAL = 3
 RECONNECT_INTERVAL = 10
 
 def log_error(msg, exc=None, flags = None, name = ''):
@@ -346,6 +345,7 @@ class PeerManager:
 
     def update_rarest_piece_min_heap(self, current_time):
         self.last_piece_update = current_time
+        print("update")
         self.rarest_piece_min_heap = self._piece_manager.getRarestPieceMinHeap(self.connected_peers)
 
     def _periodic_rarest_piece_update(self):
@@ -400,7 +400,7 @@ class PeerManager:
                     self._add_peer(peerObj)
                     self.launch_thread(peerObj)
         except Exception as e:
-            log_error("Error updating peer list", e)
+            log_error(f"Error updating peer list, \nTraceback:\n{traceback.format_exc()}", e)
 
     def _reconnect_peers(self):
         try:
@@ -445,171 +445,155 @@ class PeerManager:
     def read_continously_from_sock(self, peer: Peer):
         if self._get_connected_peers_count() >= MAX_CONNECTED_PEER:
             return
-        start = time.perf_counter()
         try:
             while True:
-                cur = time.perf_counter()
-                dur = (cur - start) * 1000
-                log_info(f"loop, waiting time: {dur} ms", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                start = cur
-                try:
-                    # if not peer.sock or not peer.connected or Logger.measure_time(peer.check_inactivity, "_1"):
-                    if not peer.sock or not peer.connected or peer.check_inactivity():
-                        log_error(f"Invalid socket or peer state for {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                        break
-                    
-                    
+                msg = peer.getMessage()
+                if msg:
+                    try:
+                        # if not peer.sock or not peer.connected or peer.check_inactivity():
 
-                    message_length = self._read_bytes_from_sock(4, peer)
-                    # message_length = Logger.measure_time(self._read_bytes_from_sock, "_2", 4, peer)
-                    
-                    if not message_length:
-                        log_error(f"Invalid message length from {peer.ip_port}: {len(message_length)}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                        continue
+                        message_length = msg[:4]
                         
-                    message_length = struct.unpack(">I", message_length)[0]
-                    log_info(f"{peer.ip_port}: got message with {message_length} bytes", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                    if message_length == 0:
-                        # Keep-alive message
-                        continue
-                        
-                    message_ID = self._read_bytes_from_sock(1, peer)
-                    # message_ID = Logger.measure_time(self._read_bytes_from_sock, "_3", 1, peer)
-                    if not message_ID:
-                        log_error(f"Invalid message ID from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                        continue
-                        
-                    message_ID_u = struct.unpack(">B", message_ID)[0]
-                    
-                    # Handle message based on ID
-                    if message_ID_u == 0:  # Choke
-                        peer.peer_choking = 1
-                        log_info(f"Peer {peer.ip_port} choked us", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                    elif message_ID_u == 1:  # Unchoke
-                        peer.peer_choking = 0
-                        log_info(f"Peer {peer.ip_port} unchoked us", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                    elif message_ID_u == 2:  # Interested
-                        peer.peer_interested = 1
-                        log_info(f"Peer {peer.ip_port} is interested", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                    elif message_ID_u == 3:  # Not interested
-                        peer.peer_interested = 0
-                        log_info(f"Peer {peer.ip_port} is not interested", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                    elif message_ID_u == 4:  # Have
-                        if message_length - 1 == 4:
-                            piece_index = self._read_bytes_from_sock(4, peer)
-                            # piece_index = Logger.measure_time(self._read_bytes_from_sock, "_4", 4, peer)
-                            if piece_index:
-                                piece_index = struct.unpack(">I", piece_index)[0]
-                            else:
-                                log_error(f"{peer.ip_port} 'have' message: couldn't read piece_index", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                continue
-                            if piece_index < len(peer.bit_field):
-                                peer.bit_field[piece_index] = 1
-                                peer.got_bit_field = True
-                                log_info(f"{peer.ip_port} 'have' message received for piece {piece_index}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                            else:
-                                log_error(f"{peer.ip_port} 'have' message: wrong piece_index ({piece_index}, more or eq than {len(peer.bit_field)})", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                        else:
-                            log_error(f"{peer.ip_port} 'have' message: wrong length ({message_length}, not 5)", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                
-                    elif message_ID_u == 5:  # Bitfield
-                        bitfield_length = message_length - 1
-                        bitfield_data = self._read_bytes_from_sock(bitfield_length, peer)
-                        # bitfield_data = Logger.measure_time(self._read_bytes_from_sock, "_5", bitfield_length, peer)
-                        
-                        if bitfield_data:
-                            if len(bitfield_data) == bitfield_length:
-                                peer.bit_field = bitstring.BitArray(bitfield_data)
-                                peer.got_bit_field = True
-                                log_info(f"Received valid bitfield from {peer.ip_port}: length is {len(bitfield_data)}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                            else:
-                                log_error(f"Received invalid bitfield from {peer.ip_port}: length is {len(bitfield_data)}, need {bitfield_length}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                        else:
-                            log_error(f"bitfield: couldn't read bitfield_data", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                            
-                    elif message_ID_u == 6:  # Request
-                        log_info(f"Received request from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                        data = self._read_bytes_from_sock(12, peer)
-                        # data = Logger.measure_time(self._read_bytes_from_sock, "_6", 12, peer)
-                        if data:
-                            pass
-                        else:
-                            log_error(f"bitfield: couldn't read request data", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                            
-                        if len(data) < 12:
+                        if not message_length:
+                            log_error(f"Invalid message length from {peer.ip_port}: {len(message_length)}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
                             continue
-                    elif message_ID_u == 7:  # Piece
-                        try:
-                            piece_index_b = self._read_bytes_from_sock(4, peer)
-                            # piece_index_b = Logger.measure_time(self._read_bytes_from_sock, "_7", 4, peer)
-                            if not piece_index_b:
-                                log_error(f"Invalid piece_index_b from {peer.ip_port}: {piece_index_b}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                continue
-                            block_offset_b = self._read_bytes_from_sock(4, peer)
-                            # block_offset_b = Logger.measure_time(self._read_bytes_from_sock, "_8", 4, peer)
-                            if not block_offset_b:
-                                log_error(f"Invalid piece_index_b from {peer.ip_port}: {block_offset_b}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                continue
-                            piece_index = struct.unpack(">I", piece_index_b)[0]
-                            block_offset = struct.unpack(">I", block_offset_b)[0]
-                            peer.pending_requests -= 1
-                            # Validate piece index
-                            if piece_index >= self.piece_manager.number_of_pieces:
-                                log_error(f"Invalid piece index {piece_index} from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                continue
-                                
-                            block_index = block_offset // BLOCK_SIZE
                             
-                            # # Get piece safely
-                            # if not self.piece_manager.is_index_valid(piece_index):
-                            #     log_error(f"Invalid piece index {piece_index} from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                            #     continue
-                            
-                            # # Validate block index
-                            # if block_index >= self.piece_manager.get_blocks_len(piece_index):
-                            #     log_error(f"Invalid block index {block_index} for piece {piece_index} from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                            #     continue
-                            
-                            block_data = self._read_bytes_from_sock(message_length - 9, peer)
-                            # block_data = Logger.measure_time(self._read_bytes_from_sock, "_9", message_length - 9, peer)
-                            if block_data is None:
-                                log_error(f"Invalid piece {piece_index} from {peer.ip_port}: couldn't read data", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                continue
-                                
-                            # Update block status safely
-                            log_info(f"{peer.ip_port}: update {piece_index}:{block_index}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-
-                            if self.piece_manager.update_block_status_safe(piece_index, block_index, Status.RECEIVED, block_data):
-                            # if Logger.measure_time(self.piece_manager.update_block_status_safe, "_10", piece_index, block_index, Status.RECEIVED, block_data):
-                            
-                                peer.blocks_recieved += 1
-                                                                                
-                                # Request next block if piece is not complete
-                                # if self.piece_manager.is_piece_empty(piece_index):
-                                # if Logger.measure_time(self.piece_manager.is_piece_empty, "_11", piece_index):
-                                self.prefetch_next_blocks(piece_index, peer)
-                                    # Logger.measure_time(self.prefetch_next_blocks, "_12", piece_index, peer)
-                            
-                            # print(f"read sock wrote {piece_index}")
-                                
-                        except struct.error as e:
-                            log_error(f"Error unpacking piece message from {peer.ip_port}", e, flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                        message_length = struct.unpack(">I", message_length)[0]
+                        # log_info(f"{peer.ip_port}: got message with {message_length} bytes", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                        if message_length == 0:
                             continue
-                        except Exception as e:
-                            log_error(f"Error processing piece message from {peer.ip_port}", e)
+                            
+                        message_ID = msg[4:5]
+                        if not message_ID:
+                            log_error(f"Invalid message ID from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
                             continue
-                    else:
-                        log_error(f"Unsupported message from {peer.ip_port}: message length: {message_length}, id: {message_ID_u}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                            
+                        message_ID_u = struct.unpack(">B", message_ID)[0]
                         
+                        if message_ID_u == 0:  # Choke
+                            peer.peer_choking = 1
+                            log_info(f"Peer {peer.ip_port} choked us", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                        elif message_ID_u == 1:  # Unchoke
+                            peer.peer_choking = 0
+                            log_info(f"Peer {peer.ip_port} unchoked us", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                        elif message_ID_u == 2:  # Interested
+                            peer.peer_interested = 1
+                            log_info(f"Peer {peer.ip_port} is interested", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                        elif message_ID_u == 3:  # Not interested
+                            peer.peer_interested = 0
+                            log_info(f"Peer {peer.ip_port} is not interested", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                        elif message_ID_u == 4:  # Have
+                            if message_length - 1 == 4:
+                                piece_index = msg[5:9]
+                                if piece_index:
+                                    piece_index = struct.unpack(">I", piece_index)[0]
+                                else:
+                                    log_error(f"{peer.ip_port} 'have' message: couldn't read piece_index", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                                    continue
+                                if piece_index < len(peer.bit_field):
+                                    peer.bit_field[piece_index] = 1
+                                    peer.got_bit_field = True
+                                    log_info(f"{peer.ip_port} 'have' message received for piece {piece_index}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                                else:
+                                    log_error(f"{peer.ip_port} 'have' message: wrong piece_index ({piece_index}, more or eq than {len(peer.bit_field)})", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                            else:
+                                log_error(f"{peer.ip_port} 'have' message: wrong length ({message_length}, not 5)", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
                                     
-                except socket.timeout:
-                    continue
-                except ConnectionResetError:
-                    log_error(f"Connection reset by peer {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                    break
-                except Exception as e:
-                    log_error(f"Error reading from {peer.ip_port}", e, flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                    break
+                        elif message_ID_u == 5:  # Bitfield
+                            bitfield_length = message_length - 1
+                            
+                            bitfield_data = msg[5:5 + bitfield_length]
+                            if bitfield_data:
+                                if len(bitfield_data) == bitfield_length:
+                                    peer.bit_field = bitstring.BitArray(bitfield_data)
+                                    peer.got_bit_field = True
+                                    log_info(f"Received valid bitfield from {peer.ip_port}: length is {len(bitfield_data)}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                                else:
+                                    log_error(f"Received invalid bitfield from {peer.ip_port}: length is {len(bitfield_data)}, need {bitfield_length}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                            else:
+                                log_error(f"bitfield: couldn't read bitfield_data", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                                
+                        elif message_ID_u == 6:  # Request
+                            # log_info(f"Received request from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                            data = msg[5:17]
+                            if data:
+                                pass
+                            else:
+                                log_error(f"bitfield: couldn't read request data", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                                
+                            if len(data) < 12:
+                                continue
+                        elif message_ID_u == 7:  # Piece
+                            try:
+                                # piece_index_b = msg[5:9]
+                                # if not piece_index_b:
+                                #     log_error(f"Invalid piece_index_b from {peer.ip_port}: {piece_index_b}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                                #     continue
+                                # block_offset_b = msg[9:13]
+                                # if not block_offset_b:
+                                #     log_error(f"Invalid piece_index_b from {peer.ip_port}: {block_offset_b}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                                #     continue
+                                # piece_index = struct.unpack(">I", piece_index_b)[0]
+                                # block_offset = struct.unpack(">I", block_offset_b)[0]
+                                peer.pending_requests -= 1
+                                # Validate piece index
+                                # if piece_index >= self.piece_manager.number_of_pieces:
+                                #     log_error(f"Invalid piece index {piece_index} from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                                #     continue
+                                    
+                                # block_index = block_offset // BLOCK_SIZE
+                                
+                                # # Get piece safely
+                                # if not self.piece_manager.is_index_valid(piece_index):
+                                #     log_error(f"Invalid piece index {piece_index} from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                                #     continue
+                                
+                                # # Validate block index
+                                # if block_index >= self.piece_manager.get_blocks_len(piece_index):
+                                #     log_error(f"Invalid block index {block_index} for piece {piece_index} from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                                #     continue
+                                
+                                # block_data = msg[13:message_length + 4]
+                                # if block_data is None:
+                                #     log_error(f"Invalid piece {piece_index} from {peer.ip_port}: couldn't read data", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                                #     continue
+                                    
+                                # Update block status safely
+                                # log_info(f"{peer.ip_port}: update {piece_index}:{block_index}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+
+                                # if self.piece_manager.update_block_status_safe(piece_index, block_index, Status.RECEIVED, block_data):
+                                # if Logger.measure_time(self.piece_manager.update_block_status_safe, "_10", piece_index, block_index, Status.RECEIVED, block_data):
+                                # self.piece_manager.update_block_status_safe(piece_index, block_index, Status.RECEIVED, block_data)
+                                peer.blocks_recieved += 1
+                                                                                    
+                                    # Request next block if piece is not complete
+                                    # if self.piece_manager.is_piece_empty(piece_index):
+                                    # if Logger.measure_time(self.piece_manager.is_piece_empty, "_11", piece_index):
+                                # self.prefetch_next_blocks(piece_index, peer)
+                                        # Logger.measure_time(self.prefetch_next_blocks, "_12", piece_index, peer)
+                                
+                                # print(f"read sock wrote {piece_index}")
+                                    
+                            except struct.error as e:
+                                log_error(f"Error unpacking piece message from {peer.ip_port}", e, flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                                continue
+                            except Exception as e:
+                                log_error(f"Error processing piece message from {peer.ip_port}", e)
+                                continue
+                        else:
+                            log_error(f"Unsupported message from {peer.ip_port}: message length: {message_length}, id: {message_ID_u}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                            
+                                        
+                    except socket.timeout:
+                        continue
+                    except ConnectionResetError:
+                        log_error(f"Connection reset by peer {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                        break
+                    except Exception as e:
+                        log_error(f"Error reading from {peer.ip_port}", e, flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                        break
+                else:
+                    log_error("empty")
                         
         except Exception as e:
             log_error(f"Fatal error in read thread for {peer.ip_port}", e, flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
@@ -623,51 +607,6 @@ class PeerManager:
                 peer.sock.close()
             except:
                 pass
-
-    @staticmethod
-    def _read_bytes_from_sock(length: int, peer: Peer):
-        peer.update_activity()
-        if length <= 0:
-            log_error(f"Invalid piece data length {length} from {peer.ip_port}", flags=['piece Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-            return None
-            
-        data = b''
-        required = length
-        timeout = 10  # 1 seconds timeout for reading piece data
-        start_time = time.time()
-        
-        while required > 0:
-            try:
-                if time.time() - start_time > timeout:
-                    log_error(f"Timeout reading piece data from {peer.ip_port}", flags=['piece Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                    return None
-                    
-                start = time.time()
-                buff = peer.sock.recv(min(required, 65536))  # Increased buffer size to 64KB
-                end = time.time()
-                
-                if buff and len(buff) > 0:
-                    peer.rate = len(buff) // 125
-                    peer.rate = peer.rate // (end - start) if (end - start) > 0 else 0
-                    data += buff
-                    required = length - len(data)
-                    
-            except socket.error as e:
-                err = e.args[0]
-                if err != errno.EAGAIN and err != errno.EWOULDBLOCK:
-                    log_error(f"Socket error reading piece data from {peer.ip_port}", e, flags=['piece Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                    return None
-                time.sleep(0.1) 
-                continue
-            except Exception as e:
-                log_error(f"Error reading piece data from {peer.ip_port}", e, flags=['piece Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                return None
-                
-        if len(data) != length:
-            log_error(f"Received incomplete piece data from {peer.ip_port}: got {len(data)} bytes, expected {length}", flags=['piece Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-            return None
-            
-        return data
         
     def launch_thread(self, peer: Peer):
         p = threading.Thread(target=self.MultiThreadedConnection, args=(peer,))
@@ -675,6 +614,9 @@ class PeerManager:
         p.start()
     
     def MultiThreadedConnection(self, peer:Peer):
+        if peer.ip != '5.79.98.162':
+            return
+        log_info(f"MultiThreadedConnection in {peer.ip}")
         if peer.connection_attempts >= peer.max_connection_attempts:
             log_info(f"Max connection attempts reached for {peer.ip_port}")
             return
@@ -688,6 +630,7 @@ class PeerManager:
                 
             sock = peer.connect_to_peer()
             if sock is None:
+                peer.bad_peer = True
                 return
                 
             # Set socket timeout for handshake
@@ -701,13 +644,13 @@ class PeerManager:
             max_retries = 3
             for attempt in range(max_retries):  # Try handshake up to 3 times
                 try:
-                    peer.send_data(handshake_bytes)
+                    peer._send_data(handshake_bytes)
                     peer.handshake_sent = True
                     
                     # Read handshake response with retry
                     data = None
                     try:
-                        data = self._read_bytes_from_sock(68, peer)
+                        data = peer._read_bytes_from_sock(68)
                         if not data:
                             raise Exception
                     except socket.timeout:
@@ -739,12 +682,14 @@ class PeerManager:
                 except socket.timeout:
                     log_error(f"Handshake timeout for {peer.ip_port}")
                     if attempt == 2:  # Last attempt
+                        peer.bad_peer = True
                         return
                     time.sleep(1)
                     continue
                 except Exception as e:
                     log_error(f"Handshake error for {peer.ip_port}", e)
                     if attempt == 2:  # Last attempt
+                        peer.bad_peer = True
                         return
                     time.sleep(1)
                     continue
@@ -767,13 +712,14 @@ class PeerManager:
             interested_message = interested().byteStringForInterested()
             for attempt in range(max_retries):
                 try:
-                    if peer.send_data(interested_message):
+                    if peer._send_data(interested_message):
                         peer.am_interested = 1
                     interested_sent = True
                     break
                 except Exception as e:
                     if attempt == 2:  # Last attempt
                         log_error(f"Error sending interested message to {peer.ip_port}", e)
+                        peer.bad_peer = True
                         return
                     time.sleep(1)
             
@@ -805,6 +751,7 @@ class PeerManager:
                 except:
                     pass
         if peer.connected:
+            peer.launch_socket_thread()
             threading.current_thread().name = "read"
             self.read_continously_from_sock(peer)
             # t = threading.Thread(target=self.read_continously_from_sock, args=(peer,))
@@ -819,54 +766,67 @@ class PeerManager:
             block_offset = block_index * BLOCK_SIZE
             
             # Ensure block size is valid
-            if block_size <= 0 or block_size > BLOCK_SIZE:
-                log_error(f"Invalid block size {block_size} for piece {piece_index}")
-                return None
+            # if block_size <= 0 or block_size > BLOCK_SIZE:
+            #     log_error(f"Invalid block size {block_size} for piece {piece_index}")
+            #     return None
                 
-            request_obj = request(piece_index, block_offset, block_size)
-            return request_obj.byteStringForRequest()
+            return request(piece_index, block_offset, block_size).byteStringForRequest()
         except Exception as e:
             log_error(f"Error creating request message for piece {piece_index}, block {block_index}", e)
             return None
 
     def prefetch_next_blocks(self, piece_index, peer: Peer, available_requests = 32):
         """Request next blocks from the same piece following BitTorrent protocol"""
-        empty_blocks = self.piece_manager.get_empty_blocks(piece_index)
-        empty_blocks = empty_blocks[:available_requests]
-        for block_index in empty_blocks:
+        # print("prefetch")
+        # empty_blocks = self.piece_manager.get_empty_blocks(piece_index)[:available_requests]
+        # empty_blocks = Logger.measure_time(self.piece_manager.get_empty_blocks, ")0", piece_index)[:available_requests]
+        # for block_index in empty_blocks:
+        for block_index in range(4):
             try:
-                request_block = self.request_blockByteString(piece_index, block_index, self.piece_manager.get_block_size(piece_index, block_index))
-                if not request_block:
-                    continue
+                # if self.piece_manager.get_block_size(piece_index, block_index) != 16384:
+                #     print(self.piece_manager.get_block_size(piece_index, block_index))
+                #     while True:
+                #         print(piece_index)
+                #         print(block_index)
+                #         print(self.piece_manager.get_block_size(piece_index, block_index))
+                #         print('111111111111111111')
+                # request_block = self.request_blockByteString(piece_index, block_index, self.piece_manager.get_block_size(piece_index, block_index))
+                # request_block = self.request_blockByteString(piece_index, block_index, 16384)
+                # request_block = Logger.measure_time(self.request_blockByteString, ")1", piece_index, block_index, self.piece_manager.get_block_size(piece_index, block_index))
+                # if not request_block:
+                    # continue
                     
+                # current_time = time.time()
                 peer.pending_requests += 1
                 peer.requests_sent += 1
-                peer.last_request_time = time.time()
-                
-                try:
-                    if not peer.send_data(request_block):
-                        raise Exception("Failed to send data to peer")
+                # peer.last_request_time = current_time
+                peer.send_data(request(piece_index, block_index * BLOCK_SIZE, 16384).byteStringForRequest())
+                # try:
+                #     if not peer.send_data(request_block):
+                #     # if not Logger.measure_time(peer.send_data, ")2" ,request_block):
+                #         raise Exception("Failed to send data to peer")
                     
-                    self.piece_manager.update_block_status_safe(
-                        piece_index, block_index, Status.REQUESTED,
-                        last_requested=time.time()
-                    )                            
-                except Exception as sock_error:
-                    peer.pending_requests -= 1
-                    self.piece_manager.update_block_status_safe(
-                        piece_index, block_index, Status.EMPTY
-                    )
-                    log_error(f"Socket error for {peer.ip_port}: {sock_error}")
-                    try:
-                        if self.is_peer_connected(peer):
-                            self._remove_connected_peer(peer)
-                    except Exception as e:
-                        log_error(f"Error removing peer after socket error: {e}")
-                    break
+                #     # self.piece_manager.update_block_status_safe(piece_index, block_index, Status.REQUESTED, last_requested=current_time)                            
+                #     # Logger.measure_time(self.piece_manager.update_block_status_safe, ")3", piece_index, block_index, Status.REQUESTED, last_requested=current_time)                            
+                # except Exception as sock_error:
+                #     peer.pending_requests -= 1
+                #     self.piece_manager.update_block_status_safe(
+                #         piece_index, block_index, Status.EMPTY
+                #     )
+                #     log_error(f"Socket error for {peer.ip_port}: {sock_error}")
+                #     try:
+                #         if self.is_peer_connected(peer):
+                #             self._remove_connected_peer(peer)
+                #     except Exception as e:
+                #         log_error(f"Error removing peer after socket error: {e}")
+                #     break
                     
             except Exception as e:
                 log_error(f"Error requesting next block: {piece_index}:{block_index}", e)
                 raise
+            
+        # if empty_blocks:
+        return 1
 
     def findRate(self):
         sum = 0

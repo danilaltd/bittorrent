@@ -62,7 +62,7 @@ def log_info(msg, flags = None, name = ''):
 
 class Bittorrent:
     def __init__(self) -> None:
-        self.max_concurrent_blocks = 150
+        self.max_concurrent_blocks = 150000
         self.semaphore = threading.Semaphore(self.max_concurrent_blocks)
         self._progress_thread = None
         self._monitor_thread = None
@@ -122,7 +122,7 @@ class Bittorrent:
             try:
                 print("loop")
                 self._update_stats()
-                self.peer_manager.update_optimistic_unchoke()
+                # self.peer_manager.update_optimistic_unchoke()
                 self._download_rarest_first()
             except Exception as e:
                 log_error(f"Error in download loop: {e}")
@@ -136,34 +136,41 @@ class Bittorrent:
         try:
             min_heap: list[tuple[int, list[Peer]]] = self.peer_manager.get_rarest_piece_min_heap_copy()
             # min_heap: list[tuple[Piece, list[Peer]]] = self.peer_manager.piece_manager.filter(raw_heap, 150)
-            threads = []
             i = 0
             # print("append start")
             sent = False
-            for piece_i, peers in min_heap:
-                if i >= self.max_concurrent_blocks:
-                    break
-                if not peers:
-                    break
+            if min_heap[0][1]:
+                min_heap = [item for item in min_heap if item[0] != 1390]
+                sent = True
+                for piece_i, peers in min_heap:
+                    print(i)
+                # if i >= self.max_concurrent_blocks:
+                    # break
+                # if not peers:
+                    # break
                 # if not self.peer_manager.piece_manager.is_need_to_download(piece_i):
                     # continue
-                i+=1
-                try:
-                    self._request_piece_from_peers(piece_i, peers)
-                    sent = True
+                    # i += self._request_piece_from_peers(piece_i, peers)
+                    i += self.peer_manager.prefetch_next_blocks(piece_i, peers[0])
+                    
+                # try:
+                #     i += self._request_piece_from_peers(piece_i, peers)
+                #     sent = True
+                    # if i == 500:
+                        # break
                     # thread = threading.Thread(target=self._request_piece_from_peers, args=(piece_i, peers))
                     # thread.daemon = True
                     # threads.append(thread)
-                except Exception as e:
-                    log_error(f"Error creating thread for piece {piece_i}: {e}")
-                    continue
-            if threads:
-                for thread in threads:
-                    try:
-                        thread.start()
-                    except Exception as e:
-                        log_error(f"Error starting thread: {e}")
-                        continue
+                # except Exception as e:
+                #     log_error(f"Error creating thread for piece {piece_i}: {e}")
+                #     continue
+            # if threads:
+            #     for thread in threads:
+            #         try:
+            #             thread.start()
+            #         except Exception as e:
+            #             log_error(f"Error starting thread: {e}")
+            #             continue
                 # for thread in threads:
                 #     try:
                 #         thread.join(timeout=30)
@@ -172,6 +179,8 @@ class Bittorrent:
             if not sent:
                 Logger.info("No peers available. Retrying...")
                 time.sleep(1)
+            else:
+                time.sleep(1000)
         except Exception as e:
             log_error(f"Error in _download_rarest_first: {e}")
 
@@ -183,7 +192,8 @@ class Bittorrent:
             available_peers = peers           
             peer = None
             try:
-                peer = self.peer_manager.get_best_peer(available_peers)
+                # peer = self.peer_manager.get_best_peer(available_peers)
+                peer = available_peers[0]
             except Exception as e:
                 log_error(f"Error getting best peer: {e}")
                 return
@@ -192,21 +202,22 @@ class Bittorrent:
                 Logger.info(f"Could not select best peer for piece {piece_index}")
                 return
             
-            try:
-                if not peer.connected:
-                    Logger.info(f"Selected peer {peer.ip_port} is no longer valid: not connected now")
-                    return
-                if not peer.sock:
-                    Logger.info(f"Selected peer {peer.ip_port} is no longer valid: socket is bad")
-                    return
-                if not peer.is_socket_valid():
-                    Logger.info(f"Selected peer {peer.ip_port} is no longer valid: invalid socket")
-                    return
-            except Exception as e:
-                log_error(f"Error validating selected peer: {e}")
-                return
+            # try:
+            #     if not peer.connected:
+            #         Logger.info(f"Selected peer {peer.ip_port} is no longer valid: not connected now")
+            #         return
+            #     if not peer.sock:
+            #         Logger.info(f"Selected peer {peer.ip_port} is no longer valid: socket is bad")
+            #         return
+            #     if not peer.is_socket_valid():
+            #         Logger.info(f"Selected peer {peer.ip_port} is no longer valid: invalid socket")
+            #         return
+            # except Exception as e:
+            #     log_error(f"Error validating selected peer: {e}")
+            #     return
             
-            self.peer_manager.prefetch_next_blocks(piece_index, peer)
+            return self.peer_manager.prefetch_next_blocks(piece_index, peer)
+            # return Logger.measure_time(self.peer_manager.prefetch_next_blocks, "(0", piece_index, peer)
             
         except Exception as e:
             log_error(f"Error in _request_piece_from_peers for piece {piece_index}: {e}")
@@ -241,6 +252,7 @@ class Bittorrent:
         self.file_thread.join()
         
     def monitor_block_timeouts(self, check_interval=5, timeout=10):
+        time.sleep(100000)
         while self.running:
             self.peer_manager.piece_manager.monitor_block_timeouts_safe(timeout)
             time.sleep(check_interval)
