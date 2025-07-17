@@ -14,6 +14,8 @@ import struct
 import traceback
 import selectors
 
+MAX_CONNECTION_ATTEMPTS = 3
+
 def RoundUp(x):
     return ((x + 7) & (-8))
 
@@ -106,8 +108,6 @@ class Peer:
         self._blocks_recieved_lock = RWLock("_blocks_recieved_lock")
         self._connection_attempts = 0
         self._connection_attempts_lock = RWLock("_connection_attempts_lock")
-        self._max_connection_attempts = 3
-        self._max_connection_attempts_lock = RWLock("_max_connection_attempts_lock")
         self._connection_timeout = 10
         self._connection_timeout_lock = RWLock("_connection_timeout_lock")
         self._last_connection_attempt = 0
@@ -140,126 +140,13 @@ class Peer:
         self._connecting_lock = RWLock("_connecting_lock")
         
         self._socket_worker = None
-        
         self.selector = selectors.DefaultSelector()
         self.send_buf = bytearray()
+        self.recv_buf = bytearray()
+        self.send_view = None
         self.send_queue = queue.Queue()
         self.receive_queue = queue.Queue()
-        self.send_view = None
-        self.recv_buf = bytearray()
 
-    def launch_socket_thread(self):
-        self._socket_worker = threading.Thread(target=self._socket_worker_loop, daemon=True)
-        self._socket_worker.start()
-
-    def _socket_worker_loop(self):
-        self.sock.setblocking(False)
-        self.selector.register(self.sock, selectors.EVENT_READ | selectors.EVENT_WRITE)
-        while self.connected:
-            print(f"send: {self.send_queue.qsize()}; rec: {self.receive_queue.qsize()}")
-            events = self.selector.select(timeout=1)
-            for key, mask in events:
-                if mask & selectors.EVENT_READ:
-                    self._handle_read()
-                if mask & selectors.EVENT_WRITE:
-                    self._handle_write()
-            
-    def _handle_write(self):
-        """Send as much data from send_buf and send_queue as socket allows."""
-        # Refill send_buf if empty and no current view
-        if self.send_view is None:
-            while not self.send_buf:
-                try:
-                    chunk = self.send_queue.get_nowait()
-                    self.send_buf.extend(chunk)
-                except queue.Empty:
-                    break
-            if self.send_buf:
-                self.send_view = memoryview(self.send_buf)
-
-        if self.send_view:
-            try:
-                sent = self.sock.send(self.send_view)
-                if sent > 0:
-                    self.send_view = self.send_view[sent:]
-                    if len(self.send_view) == 0:
-                        self.send_view = None
-                        self.send_buf.clear()
-                else:
-                    self.connected = False
-                    log_error(f"sent == 0")
-            except BlockingIOError:
-                pass
-            except Exception as e:
-                log_error(f"Fatal in _handle_write {e}, \nTraceback:\n{traceback.format_exc()}")
-                self.connected = False
-
-    def _handle_read(self):
-        try:
-            data = self.sock.recv(8192)
-            if not data:
-                # connection closed by peer
-                self.close()
-                return
-            self.recv_buf.extend(data)
-
-            # parse complete messages: 4-byte big-endian length + payload
-            offset = 0
-            while len(self.recv_buf) - offset >= 4:
-                length = struct.unpack_from('>I', self.recv_buf, offset)[0]
-                if len(self.recv_buf) - offset < 4 + length:
-                    break
-                start = offset + 4
-                end = start + length
-                msg = bytes(self.recv_buf[offset:end])
-                self.receive_queue.put(self.recv_buf[offset:end])
-                offset = end
-
-            # remove parsed bytes
-            if offset > 0:
-                del self.recv_buf[:offset]
-
-        except BlockingIOError:
-            pass
-        except Exception as e:
-            traceback.print_exc()
-            self.close()
-
-    def _recv_exact(self, nbytes: int) -> bytes:
-        """Receive exactly nbytes or return None if failed/closed."""
-        buf = bytearray()
-        start = time.time()
-        timeout = 10
-        while len(buf) < nbytes:
-            # Use selector to wait for read availability
-            events = self.selector.select(timeout=timeout)
-            if not events:
-                log_error("not events")
-                return None
-            try:
-                chunk = self.sock.recv(nbytes - len(buf))
-                if not chunk:
-                    log_error("not chunk")
-                    return None
-                buf.extend(chunk)
-            except BlockingIOError:
-                continue
-            except Exception as e:
-                log_error(f"Exception: {e}")
-                return None
-            # Timeout check
-            if time.time() - start > timeout:
-                log_error(f"timeout")
-                return None
-        return bytes(buf)
-    
-    def getMessage(self):
-        try:
-            data = self.receive_queue.get_nowait()   
-            return data
-        except: 
-            return None
-    
     @property
     def sock(self):
         with timed_lock(self._sock_lock.read_access, "_sock_lock.read_access"):
@@ -394,15 +281,6 @@ class Peer:
     def connection_attempts(self, value):
         with timed_lock(self._connection_attempts_lock.write_access, "_connection_attempts_lock.write_access"):
             self._connection_attempts = value
-
-    @property
-    def max_connection_attempts(self):
-        with timed_lock(self._max_connection_attempts_lock.read_access, "_max_connection_attempts_lock.read_access"):
-            return self._max_connection_attempts
-    @max_connection_attempts.setter
-    def max_connection_attempts(self, value):
-        with timed_lock(self._max_connection_attempts_lock.write_access, "_max_connection_attempts_lock.write_access"):
-            self._max_connection_attempts = value
 
     @property
     def connection_timeout(self):
@@ -544,6 +422,119 @@ class Peer:
         with timed_lock(self._connecting_lock.write_access, "_connecting_lock.write_access"):
             self._connecting = value
 
+            # print(f"send: {self.send_queue.qsize()}; rec: {self.receive_queue.qsize()}")
+    def launch_socket_thread(self):
+        self._socket_worker = threading.Thread(target=self._socket_worker_loop, daemon=True)
+        self._socket_worker.start()
+
+    def _socket_worker_loop(self):
+        self.sock.setblocking(False)
+        self.selector.register(self.sock, selectors.EVENT_READ | selectors.EVENT_WRITE)
+        while self.connected:
+            events = self.selector.select(timeout=1)
+            for key, mask in events:
+                if mask & selectors.EVENT_READ:
+                    self._handle_read()
+                if mask & selectors.EVENT_WRITE:
+                    self._handle_write()
+            
+    def _handle_write(self):
+        """Send as much data from send_buf and send_queue as socket allows."""
+        # Refill send_buf if empty and no current view
+        if self.send_view is None:
+            while not self.send_buf:
+                try:
+                    chunk = self.send_queue.get_nowait()
+                    self.send_buf.extend(chunk)
+                except queue.Empty:
+                    break
+            if self.send_buf:
+                self.send_view = memoryview(self.send_buf)
+
+        if self.send_view:
+            try:
+                sent = self.sock.send(self.send_view)
+                if sent > 0:
+                    self.send_view = self.send_view[sent:]
+                    if len(self.send_view) == 0:
+                        self.send_view = None
+                        self.send_buf.clear()
+                else:
+                    self.connected = False
+                    log_error(f"sent == 0")
+            except BlockingIOError:
+                log_error("BlockingIOError")
+                pass
+            except Exception as e:
+                log_error(f"Fatal in _handle_write {e}, \nTraceback:\n{traceback.format_exc()}")
+                self.connected = False
+
+    def _handle_read(self):
+        try:
+            data = self.sock.recv(8192)
+            if not data:
+                # connection closed by peer
+                self.close()
+                return
+            self.recv_buf.extend(data)
+
+            # parse complete messages: 4-byte big-endian length + payload
+            offset = 0
+            while len(self.recv_buf) - offset >= 4:
+                length = struct.unpack_from('>I', self.recv_buf, offset)[0]
+                if len(self.recv_buf) - offset < 4 + length:
+                    break
+                start = offset + 4
+                end = start + length
+                msg = bytes(self.recv_buf[offset:end])
+                self.receive_queue.put(self.recv_buf[offset:end])
+                offset = end
+
+            # remove parsed bytes
+            if offset > 0:
+                del self.recv_buf[:offset]
+
+        except BlockingIOError:
+            pass
+        except Exception as e:
+            traceback.print_exc()
+            self.close()
+
+    def _recv_exact(self, nbytes: int) -> bytes:
+        """Receive exactly nbytes or return None if failed/closed."""
+        buf = bytearray()
+        start = time.time()
+        timeout = 10
+        while len(buf) < nbytes:
+            # Use selector to wait for read availability
+            events = self.selector.select(timeout=timeout)
+            if not events:
+                log_error("not events")
+                return None
+            try:
+                chunk = self.sock.recv(nbytes - len(buf))
+                if not chunk:
+                    log_error("not chunk")
+                    return None
+                buf.extend(chunk)
+            except BlockingIOError:
+                continue
+            except Exception as e:
+                log_error(f"Exception: {e}")
+                return None
+            # Timeout check
+            if time.time() - start > timeout:
+                log_error(f"timeout")
+                return None
+        return bytes(buf)
+    
+    def getMessage(self):
+        try:
+            data = self.receive_queue.get_nowait()   
+            return data
+        except: 
+            return None
+    
     def is_socket_valid(self):
         """Check if socket is valid and connected"""
         if not self.sock:
@@ -701,7 +692,6 @@ class Peer:
             except:
                 pass
         
-        # Обновляем состояние под блокировкой (быстрая операция)
         self.connected = False
         self.handshake_sent = False
         self.handshake_received = False
@@ -838,21 +828,22 @@ class Peer:
         return data
         
     def peer_score(self):
-        # Base score on download rate
-        rate_score = self.rate if self.rate else 0
+        # if self.ip == "5.79.98.162":
+            # return 1000
+        # else:
+            # return -1000
         
-        # Bonus for unchoked peers
-        unchoke_bonus = 1000 if not self.peer_choking else 0
-        
-        # Bonus for peers with more pieces we need
-        # needed_pieces = sum(1 for i, piece in enumerate(self.piece_manager.pieces) 
-                            # if not piece.is_complete() and self.bit_field[i])
-        # piece_bonus = needed_pieces * 100
-        
-        # Penalty for peers with connection issues
-        connection_penalty = self.connection_attempts * 500
-        
-        return rate_score + unchoke_bonus - connection_penalty #+ piece_bonus
+        if self.peer_choking or not self.connected:
+            print("ret -inf")
+            return float('-inf')
+
+        if self.requests_sent > 0:
+            efficiency = self.blocks_recieved / self.requests_sent
+        else:
+            efficiency = 0.0
+
+        score = self.blocks_recieved * 10 + efficiency * 200
+        return score
     
     def is_active(self, needed_pieces: set):
         bitfield = self.bit_field.copy()

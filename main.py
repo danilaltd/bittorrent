@@ -87,12 +87,14 @@ class Bittorrent:
                 Logger.error(f"Ошибка при очистке папки logs: {e}")
         else:
             Logger.info("Папка logs не найдена, создание не требуется")
+        os.makedirs('logs', exist_ok=True)
+        os.makedirs(os.path.join('logs', "peermanager"), exist_ok=True)
+
 
     def start_downloading(self, torrent, path):
         self._clear_logs_directory()
         self.tracker = Tracker(torrent, path)
         self.peer_manager = PeerManager(self.tracker)
-        self.file_thread = threading.Thread(target=self.peer_manager.piece_manager.write_into_file_safe)
         
         Logger.info(f"Total torrent length: {self.tracker.torrent_obj.total_length}")
 
@@ -105,7 +107,8 @@ class Bittorrent:
 
     def _initialize(self):
         self.tracker.start_periodic_updates()
-        self.file_thread.start()
+        # self.file_thread = threading.Thread(target=self.peer_manager.piece_manager.write_into_file_safe)
+        # self.file_thread.start()
 
     def _download_loop(self):
         # Start monitor thread
@@ -118,10 +121,11 @@ class Bittorrent:
         self._progress_thread.daemon = True
         self._progress_thread.start()
         
-        while not self.peer_manager.piece_manager.all_piece_complete_safe():
+        # while not self.peer_manager.piece_manager.all_piece_complete_safe():
+        while True:
             try:
                 print("loop")
-                self._update_stats()
+                # self._update_stats()
                 # self.peer_manager.update_optimistic_unchoke()
                 self._download_rarest_first()
             except Exception as e:
@@ -140,10 +144,10 @@ class Bittorrent:
             # print("append start")
             sent = False
             if min_heap[0][1]:
-                min_heap = [item for item in min_heap if item[0] != 1390]
+                # min_heap = [item for item in min_heap if item[0] != 1000]
                 sent = True
                 for piece_i, peers in min_heap:
-                    print(i)
+                    # print(i)
                 # if i >= self.max_concurrent_blocks:
                     # break
                 # if not peers:
@@ -151,7 +155,9 @@ class Bittorrent:
                 # if not self.peer_manager.piece_manager.is_need_to_download(piece_i):
                     # continue
                     # i += self._request_piece_from_peers(piece_i, peers)
-                    i += self.peer_manager.prefetch_next_blocks(piece_i, peers[0])
+                    # best_peer = max(peers, key=lambda peer: peer.peer_score())
+                    best_peer = peers[0]
+                    i += self.peer_manager.prefetch_next_blocks(piece_i, best_peer)
                     
                 # try:
                 #     i += self._request_piece_from_peers(piece_i, peers)
@@ -179,8 +185,8 @@ class Bittorrent:
             if not sent:
                 Logger.info("No peers available. Retrying...")
                 time.sleep(1)
-            else:
-                time.sleep(1000)
+            # else:
+                # time.sleep(1000)
         except Exception as e:
             log_error(f"Error in _download_rarest_first: {e}")
 
@@ -251,14 +257,15 @@ class Bittorrent:
         self.peer_manager.exitPeerThreads()
         self.file_thread.join()
         
-    def monitor_block_timeouts(self, check_interval=5, timeout=10):
+    def monitor_block_timeouts(self, check_interval=5, timeout=15):
         time.sleep(100000)
         while self.running:
             self.peer_manager.piece_manager.monitor_block_timeouts_safe(timeout)
             time.sleep(check_interval)
 
     def progress_printer(self):
-        while not self.peer_manager.piece_manager.all_piece_complete_safe() and self.running:
+        # not self.peer_manager.piece_manager.all_piece_complete_safe() and
+        while self.running:
             self.peer_manager.piece_manager.print_progress_bar_safe(
                 f"{self.peer_manager.piece_manager.num_of_downloaded_pieces()}/{self.peer_manager.piece_manager.num_of_requested_pieces()}/{self.peer_manager.piece_manager.num_of_empty_pieces()}/{self.peer_manager.piece_manager.number_of_pieces}",
                 print_matrix=True,
@@ -279,6 +286,7 @@ if __name__ == "__main__":
 
     # torrent = r'.\torrents\music.torrent'
     # path = r"./down"
+    
     torrent = os.path.join('torrents', 'music.torrent')
     path = os.path.join('.', 'down')
     b = Bittorrent()
