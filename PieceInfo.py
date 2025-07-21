@@ -204,9 +204,9 @@ class PieceInfo:
         if peers is not None:
             out += self._peer_stats_string_internal(peers)   
         
-        matrix_data = self._get_pieces_matrix_safe()
-        if print_matrix and matrix_data:
-            out += self._matrix_string_internal(matrix_data)
+        # matrix_data = self._get_pieces_matrix_safe()
+        # if print_matrix and matrix_data:
+            # out += self._matrix_string_internal(matrix_data)
         
         try:
             os.makedirs('logs', exist_ok=True)
@@ -312,6 +312,38 @@ class PieceInfo:
                 peer_id = peer.ip
                 # available = peer.avaliable_pieces(needed_pieces)
                 
+                if peer.connected:
+                    current_time = time.time()
+                    time_diff = current_time - peer._last_update_time
+                    if time_diff >= 0.5 or not len(peer._speed_history):
+                        # if peers:
+                            # blocks_done = peers[0].blocks_recieved
+                        # else:
+                        blocks_done = peer.blocks_recieved
+                        current_bytes = blocks_done * BLOCK_SIZE
+                        bytes_diff = current_bytes - peer._last_bytes_done
+                        
+                        current_speed = bytes_diff / time_diff if time_diff > 0 else 0
+                        
+                        peer._speed_history.append(current_speed)
+                        if len(peer._speed_history) > 5:
+                            peer._speed_history.pop(0)
+                    
+                    peer._download_speed = sum(peer._speed_history) / len(peer._speed_history)
+                    
+                    peer._last_update_time = current_time
+                    peer._last_blocks_done = blocks_done
+                    peer._last_bytes_done = current_bytes
+                    
+                speed = peer._download_speed
+                
+                if speed > 1024 * 1024:
+                    speed_str = f"{speed/1024/1024:.1f} MB/s"
+                elif speed > 1024:
+                    speed_str = f"{speed/1024:.1f} KB/s"
+                else:
+                    speed_str = f"{speed:.1f} B/s"
+                
                 
                 # active = available > 0
                 # if active:
@@ -321,12 +353,15 @@ class PieceInfo:
                 # strings.append(f"{sign:<2}")
                 strings.append(f"{peer_id:<15}")
                 # strings.append(f"Pieces: {available:<4}")
-                strings.append(f"Blocks: {peer.blocks_recieved:<4}")
-                strings.append(f"Connections: {peer.requests_sent:<3}")
-                # strings.append(f"Pending: {peer.pending_requests:<3}")
-                strings.append(f"Pending: {peer.requests_sent - peer.blocks_recieved:<3}")
-                strings.append(f"Bad: {'+' if peer.bad_peer else '-':<5}")
-                strings.append(f"Unchocked: {'+' if not peer.peer_choking else '-':<5}")
+                strings.append(f"Blocks: {peer.blocks_recieved:<6}")
+                strings.append(f"Connections: {peer.requests_sent:<7}")
+                strings.append(f"Pending: {peer.pending_requests:<7}")
+                # strings.append(f"Pending: {peer.requests_sent - peer.blocks_recieved:<7}")
+                # if abs(peer.pending_requests - (peer.requests_sent - peer.blocks_recieved)) > 0:
+                    # print(f"{peer.pending_requests} {peer.requests_sent - peer.blocks_recieved}")
+                strings.append(f"Bad: {'+' if peer.bad_peer else '-':<3}")
+                strings.append(f"Unchocked: {'+' if not peer.peer_choking else '-':<3}")
+                strings.append(f"Speed: {speed_str:<7}")
                 table += ' '.join(strings) + '\n'
         except Exception as e:
             res += f'\n[Peer stats error: {e}]\n'

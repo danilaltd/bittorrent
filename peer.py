@@ -15,7 +15,7 @@ import traceback
 import selectors
 
 MAX_CONNECTION_ATTEMPTS = 3
-
+MAX_PENDING_REQUESTS = 100
 def RoundUp(x):
     return ((x + 7) & (-8))
 
@@ -139,11 +139,12 @@ class Peer:
         self._connecting = False
         self._connecting_lock = RWLock("_connecting_lock")
         
-        self._socket_worker = None
-        self.selector = selectors.DefaultSelector()
-        self.send_buf = bytearray()
-        self.recv_buf = bytearray()
-        self.send_view = None
+        self._last_update_time = time.time()
+        self._last_blocks_done = 0
+        self._last_bytes_done = 0
+        self._download_speed = 0
+        self._speed_history = []
+        
         self.send_queue = queue.Queue()
         self.receive_queue = queue.Queue()
 
@@ -422,112 +423,6 @@ class Peer:
         with timed_lock(self._connecting_lock.write_access, "_connecting_lock.write_access"):
             self._connecting = value
 
-            # print(f"send: {self.send_queue.qsize()}; rec: {self.receive_queue.qsize()}")
-    def launch_socket_thread(self):
-        self._socket_worker = threading.Thread(target=self._socket_worker_loop, daemon=True)
-        self._socket_worker.start()
-
-    def _socket_worker_loop(self):
-        self.sock.setblocking(False)
-        self.selector.register(self.sock, selectors.EVENT_READ | selectors.EVENT_WRITE)
-        while self.connected:
-            events = self.selector.select(timeout=1)
-            for key, mask in events:
-                if mask & selectors.EVENT_READ:
-                    self._handle_read()
-                if mask & selectors.EVENT_WRITE:
-                    self._handle_write()
-            
-    def _handle_write(self):
-        """Send as much data from send_buf and send_queue as socket allows."""
-        # Refill send_buf if empty and no current view
-        if self.send_view is None:
-            while not self.send_buf:
-                try:
-                    chunk = self.send_queue.get_nowait()
-                    self.send_buf.extend(chunk)
-                except queue.Empty:
-                    break
-            if self.send_buf:
-                self.send_view = memoryview(self.send_buf)
-
-        if self.send_view:
-            try:
-                sent = self.sock.send(self.send_view)
-                if sent > 0:
-                    self.send_view = self.send_view[sent:]
-                    if len(self.send_view) == 0:
-                        self.send_view = None
-                        self.send_buf.clear()
-                else:
-                    self.connected = False
-                    log_error(f"sent == 0")
-            except BlockingIOError:
-                log_error("BlockingIOError")
-                pass
-            except Exception as e:
-                log_error(f"Fatal in _handle_write {e}, \nTraceback:\n{traceback.format_exc()}")
-                self.connected = False
-
-    def _handle_read(self):
-        try:
-            data = self.sock.recv(8192)
-            if not data:
-                # connection closed by peer
-                self.close()
-                return
-            self.recv_buf.extend(data)
-
-            # parse complete messages: 4-byte big-endian length + payload
-            offset = 0
-            while len(self.recv_buf) - offset >= 4:
-                length = struct.unpack_from('>I', self.recv_buf, offset)[0]
-                if len(self.recv_buf) - offset < 4 + length:
-                    break
-                start = offset + 4
-                end = start + length
-                msg = bytes(self.recv_buf[offset:end])
-                self.receive_queue.put(self.recv_buf[offset:end])
-                offset = end
-
-            # remove parsed bytes
-            if offset > 0:
-                del self.recv_buf[:offset]
-
-        except BlockingIOError:
-            pass
-        except Exception as e:
-            traceback.print_exc()
-            self.close()
-
-    def _recv_exact(self, nbytes: int) -> bytes:
-        """Receive exactly nbytes or return None if failed/closed."""
-        buf = bytearray()
-        start = time.time()
-        timeout = 10
-        while len(buf) < nbytes:
-            # Use selector to wait for read availability
-            events = self.selector.select(timeout=timeout)
-            if not events:
-                log_error("not events")
-                return None
-            try:
-                chunk = self.sock.recv(nbytes - len(buf))
-                if not chunk:
-                    log_error("not chunk")
-                    return None
-                buf.extend(chunk)
-            except BlockingIOError:
-                continue
-            except Exception as e:
-                log_error(f"Exception: {e}")
-                return None
-            # Timeout check
-            if time.time() - start > timeout:
-                log_error(f"timeout")
-                return None
-        return bytes(buf)
-    
     def getMessage(self):
         try:
             data = self.receive_queue.get_nowait()   
@@ -570,21 +465,15 @@ class Peer:
                 return False
 
     def connect_to_peer(self):
-        # Проверяем cooldown без блокировки
         current_time = time.time()
         if current_time - self.last_connection_attempt < self.connection_cooldown:
+            log_info(f"{self.ip}: current_time - self.last_connection_attempt < self.connection_cooldown")
             return None
         
         if not (0 < self.port < 65536):
-                log_info(f"Invalid port number {self.port} for {self.ip}")
-                return None
-
-        # Получаем блокировку только для обновления состояния
-        if current_time - self.last_connection_attempt < self.connection_cooldown:
+            log_info(f"Invalid port number {self.port} for {self.ip}")
             return None
-        self.last_connection_attempt = current_time
 
-        # Закрываем существующий сокет без блокировки
         if self.sock:
             try:
                 self.sock.shutdown(socket.SHUT_RDWR)
@@ -596,7 +485,6 @@ class Peer:
                 pass
             self.sock = None
 
-        # Создаем новый сокет и подключаемся (сетевые операции без блокировки)
         try:
             if validIPAddress(self.ip) == "IPv6":
                 log_info(f"{self.ip} is v6")
@@ -611,8 +499,8 @@ class Peer:
                 # sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
                 # sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5) 
                 # sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)  
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024 * 1024) 
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024 * 1024)  
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 * 1024 * 1024) 
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16 * 1024 * 1024)  
                 ip_port = (self.ip, self.port)
 
             log_info(f"Attempting connection to {ip_port}")
@@ -736,8 +624,8 @@ class Peer:
         
     def send_data(self, data):
         self.send_queue.put(data)
-        mask = selectors.EVENT_READ | selectors.EVENT_WRITE
-        self.selector.modify(self.sock, mask)
+        # mask = selectors.EVENT_READ | selectors.EVENT_WRITE
+        # self.selector.modify(self.sock, mask)
         return True
             
     def _send_data(self, data):
@@ -829,20 +717,25 @@ class Peer:
         
     def peer_score(self):
         # if self.ip == "5.79.98.162":
+            # print("ok")
             # return 1000
         # else:
+            # print(self.ip)
             # return -1000
         
-        if self.peer_choking or not self.connected:
-            print("ret -inf")
+        if self.peer_choking or not self.connected or self.pending_requests > (self._download_speed / (1024 * 1024)) * MAX_PENDING_REQUESTS:
+            # print(f"ret -inf: {self.ip} {self.peer_choking} {not self.connected} {self.pending_requests > MAX_PENDING_REQUESTS}")
             return float('-inf')
 
         if self.requests_sent > 0:
-            efficiency = self.blocks_recieved / self.requests_sent
+            if self.blocks_recieved == self.requests_sent:
+                score = 1
+            else:
+                score = (self.blocks_recieved / self.requests_sent) * (self._download_speed / (20 * 1024 * 1024))
         else:
-            efficiency = 0.0
-
-        score = self.blocks_recieved * 10 + efficiency * 200
+            score = 0.99
+        
+        # print(f"{self.ip}: {score}")
         return score
     
     def is_active(self, needed_pieces: set):

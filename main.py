@@ -11,6 +11,8 @@ import os
 import random
 from logger import Logger, timed_lock, print_lock_stats
 
+NEG_INF = float('-inf')
+
 def log_error(msg, exc=None, flags = None, name = ''):
     if flags is None:
         flags = []
@@ -67,6 +69,7 @@ class Bittorrent:
         self._progress_thread = None
         self._monitor_thread = None
         self.running = True
+        self.min_heap_updated = False
 
     def _clear_logs_directory(self):
         """Очищает содержимое папки logs при запуске"""
@@ -89,18 +92,21 @@ class Bittorrent:
             Logger.info("Папка logs не найдена, создание не требуется")
         os.makedirs('logs', exist_ok=True)
         os.makedirs(os.path.join('logs', "peermanager"), exist_ok=True)
-
-
+    
     def start_downloading(self, torrent, path):
         self._clear_logs_directory()
         self.tracker = Tracker(torrent, path)
-        self.peer_manager = PeerManager(self.tracker)
+        self.peer_manager = PeerManager(self.tracker, self.set_updated)
         
         Logger.info(f"Total torrent length: {self.tracker.torrent_obj.total_length}")
 
         try:
             self._initialize()
-            self._download_loop()
+            try:
+                self._download_loop()
+            except Exception as e:
+                while True:
+                    print(e)
             self._notify_trackers_complete()
         finally:
             self._finalize()
@@ -136,98 +142,34 @@ class Bittorrent:
         # if self._progress_thread and self._progress_thread.is_alive():
             # self._progress_thread.join()
 
+    def set_updated(self):
+        self.min_heap_updated = True
+
     def _download_rarest_first(self):
         try:
             min_heap: list[tuple[int, list[Peer]]] = self.peer_manager.get_rarest_piece_min_heap_copy()
-            # min_heap: list[tuple[Piece, list[Peer]]] = self.peer_manager.piece_manager.filter(raw_heap, 150)
             i = 0
-            # print("append start")
             sent = False
-            if min_heap[0][1]:
-                # min_heap = [item for item in min_heap if item[0] != 1000]
+            if min_heap and min_heap[0][1]:
                 sent = True
                 for piece_i, peers in min_heap:
-                    # print(i)
-                # if i >= self.max_concurrent_blocks:
-                    # break
-                # if not peers:
-                    # break
-                # if not self.peer_manager.piece_manager.is_need_to_download(piece_i):
-                    # continue
-                    # i += self._request_piece_from_peers(piece_i, peers)
-                    # best_peer = max(peers, key=lambda peer: peer.peer_score())
-                    best_peer = peers[0]
-                    i += self.peer_manager.prefetch_next_blocks(piece_i, best_peer)
-                    
-                # try:
-                #     i += self._request_piece_from_peers(piece_i, peers)
-                #     sent = True
-                    # if i == 500:
-                        # break
-                    # thread = threading.Thread(target=self._request_piece_from_peers, args=(piece_i, peers))
-                    # thread.daemon = True
-                    # threads.append(thread)
-                # except Exception as e:
-                #     log_error(f"Error creating thread for piece {piece_i}: {e}")
-                #     continue
-            # if threads:
-            #     for thread in threads:
-            #         try:
-            #             thread.start()
-            #         except Exception as e:
-            #             log_error(f"Error starting thread: {e}")
-            #             continue
-                # for thread in threads:
-                #     try:
-                #         thread.join(timeout=30)
-                #     except Exception as e:
-                #         Logger.error(f"Error joining thread: {e}")
+                    if self.min_heap_updated:
+                        self.min_heap_updated = False
+                        break
+                    # best_peer = peers[0]
+                    # scored_peers = [(peer.peer_score(), peer) for peer in peers]
+                    # best_score, best_peer = max(scored_peers, key=lambda x: x[0], default=(NEG_INF, None))
+                    best_peer = max(peers, key=lambda p: p.peer_score(), default=None)
+                    # print()
+                    if best_peer and best_peer.peer_score() > NEG_INF:
+                        i += self.peer_manager.prefetch_next_blocks(piece_i, best_peer)
+                    # else:
+                        # print("skip")
             if not sent:
                 Logger.info("No peers available. Retrying...")
                 time.sleep(1)
-            # else:
-                # time.sleep(1000)
         except Exception as e:
             log_error(f"Error in _download_rarest_first: {e}")
-
-    def _request_piece_from_peers(self, piece_index, peers: list[Peer]):
-        try:
-            if not peers:
-                return
-            
-            available_peers = peers           
-            peer = None
-            try:
-                # peer = self.peer_manager.get_best_peer(available_peers)
-                peer = available_peers[0]
-            except Exception as e:
-                log_error(f"Error getting best peer: {e}")
-                return
-            
-            if not peer:
-                Logger.info(f"Could not select best peer for piece {piece_index}")
-                return
-            
-            # try:
-            #     if not peer.connected:
-            #         Logger.info(f"Selected peer {peer.ip_port} is no longer valid: not connected now")
-            #         return
-            #     if not peer.sock:
-            #         Logger.info(f"Selected peer {peer.ip_port} is no longer valid: socket is bad")
-            #         return
-            #     if not peer.is_socket_valid():
-            #         Logger.info(f"Selected peer {peer.ip_port} is no longer valid: invalid socket")
-            #         return
-            # except Exception as e:
-            #     log_error(f"Error validating selected peer: {e}")
-            #     return
-            
-            return self.peer_manager.prefetch_next_blocks(piece_index, peer)
-            # return Logger.measure_time(self.peer_manager.prefetch_next_blocks, "(0", piece_index, peer)
-            
-        except Exception as e:
-            log_error(f"Error in _request_piece_from_peers for piece {piece_index}: {e}")
-            raise
 
     def _update_stats(self):
         try:
@@ -287,7 +229,10 @@ if __name__ == "__main__":
     # torrent = r'.\torrents\music.torrent'
     # path = r"./down"
     
+    # torrent = os.path.join('torrents', 'The_Jackbox_Party_Pack_3_MANY_PEERS_680MB.torrent')
     torrent = os.path.join('torrents', 'music.torrent')
     path = os.path.join('.', 'down')
     b = Bittorrent()
     b.start_downloading(torrent, path)
+    
+    
