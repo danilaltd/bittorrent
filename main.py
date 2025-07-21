@@ -229,8 +229,8 @@ if __name__ == "__main__":
     # torrent = r'.\torrents\music.torrent'
     # path = r"./down"
     
-    # torrent = os.path.join('torrents', 'The_Jackbox_Party_Pack_3_MANY_PEERS_680MB.torrent')
-    torrent = os.path.join('torrents', 'music.torrent')
+    torrent = os.path.join('torrents', 'The_Jackbox_Party_Pack_3_MANY_PEERS_680MB.torrent')
+    # torrent = os.path.join('torrents', 'music.torrent')
     path = os.path.join('.', 'down')
     b = Bittorrent()
     b.start_downloading(torrent, path)
