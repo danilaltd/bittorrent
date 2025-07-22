@@ -7,7 +7,6 @@ import os
 from logger import timed_lock
 from rwlock import RWLock
 import traceback
-import queue
 import threading
 import errno
 import struct
@@ -15,7 +14,7 @@ import traceback
 import selectors
 
 MAX_CONNECTION_ATTEMPTS = 3
-MAX_PENDING_REQUESTS = 100
+MAX_PENDING_REQUESTS = 1000
 def RoundUp(x):
     return ((x + 7) & (-8))
 
@@ -77,19 +76,17 @@ def log_info(msg, flags = None, name = ''):
         f.write(res)
 
 class Peer:
-    def __init__(self, ip_port, number_of_pieces):
+    def __init__(self, ip_port: tuple[str, int], number_of_pieces):
         self._sock: socket.socket = None
         self._sock_lock = RWLock("_sock_lock")
         self._bit_field = bitstring.BitArray(RoundUp(number_of_pieces))
+        self._bit_field_len = 0
         self._bit_field_lock = RWLock("_bit_field_lock")
         self._got_bit_field = False
-        self._got_bit_field_lock = RWLock("_got_bit_field_lock")
-        self._ip_port = ip_port
+        self._ip_port: tuple[str, int] = ip_port
         self._ip_port_lock = RWLock("_ip_port_lock")
-        self._ip = ip_port[0]
-        self._ip_lock = RWLock("_ip_lock")
-        self._port = ip_port[1]
-        self._port_lock = RWLock("_port_lock")
+        self.ip = ip_port[0]
+        self.port = ip_port[1]
         self._am_choking = 1
         self._am_choking_lock = RWLock("_am_choking_lock")
         self._am_interested = 0
@@ -145,9 +142,6 @@ class Peer:
         self._download_speed = 0
         self._speed_history = []
         
-        self.send_queue = queue.Queue()
-        self.receive_queue = queue.Queue()
-
     @property
     def sock(self):
         with timed_lock(self._sock_lock.read_access, "_sock_lock.read_access"):
@@ -158,24 +152,6 @@ class Peer:
             self._sock = value
 
     @property
-    def bit_field(self):
-        with timed_lock(self._bit_field_lock.read_access, "_bit_field_lock.read_access"):
-            return self._bit_field
-    @bit_field.setter
-    def bit_field(self, value):
-        with timed_lock(self._bit_field_lock.write_access, "_bit_field_lock.write_access"):
-            self._bit_field = value
-
-    @property
-    def got_bit_field(self):
-        with timed_lock(self._got_bit_field_lock.read_access, "_got_bit_field_lock.read_access"):
-            return self._got_bit_field
-    @got_bit_field.setter
-    def got_bit_field(self, value):
-        with timed_lock(self._got_bit_field_lock.write_access, "_got_bit_field_lock.write_access"):
-            self._got_bit_field = value
-
-    @property
     def ip_port(self):
         with timed_lock(self._ip_port_lock.read_access, "_ip_port_lock.read_access"):
             return self._ip_port
@@ -183,24 +159,6 @@ class Peer:
     def ip_port(self, value):
         with timed_lock(self._ip_port_lock.write_access, "_ip_port_lock.write_access"):
             self._ip_port = value
-
-    @property
-    def ip(self):
-        with timed_lock(self._ip_lock.read_access, "_ip_lock.read_access"):
-            return self._ip
-    @ip.setter
-    def ip(self, value):
-        with timed_lock(self._ip_lock.write_access, "_ip_lock.write_access"):
-            self._ip = value
-
-    @property
-    def port(self):
-        with timed_lock(self._port_lock.read_access, "_port_lock.read_access"):
-            return self._port
-    @port.setter
-    def port(self, value):
-        with timed_lock(self._port_lock.write_access, "_port_lock.write_access"):
-            self._port = value
 
     @property
     def am_choking(self):
@@ -423,12 +381,26 @@ class Peer:
         with timed_lock(self._connecting_lock.write_access, "_connecting_lock.write_access"):
             self._connecting = value
 
-    def getMessage(self):
-        try:
-            data = self.receive_queue.get_nowait()   
-            return data
-        except: 
-            return None
+    def set_bit_field(self, data):
+        with timed_lock(self._bit_field_lock.write_access, "_bit_field_lock.write_access"):
+            self._bit_field = bitstring.BitArray(data)
+            self._bit_field_len = len(self._bit_field)
+            self._got_bit_field = self._bit_field_len != 0
+            
+    def is_bit_set_in_bit_field(self, piece_index) -> bool:
+        if not self._got_bit_field or self._bit_field_len <= piece_index:
+            return False
+        with timed_lock(self._bit_field_lock.read_access, "_bit_field_lock.read_access"):
+            return self._bit_field[piece_index]
+    
+    def set_bit_in_bit_field(self, piece_index) -> bool:
+        if not self.is_bit_set_in_bit_field(piece_index) and self._bit_field_len > piece_index:
+            with timed_lock(self._bit_field_lock.write_access, "_bit_field_lock.write_access"):
+                self._bit_field[piece_index] = 1
+                self._got_bit_field = True
+                return True
+        return False
+    
     
     def is_socket_valid(self):
         """Check if socket is valid and connected"""
@@ -622,12 +594,6 @@ class Peer:
             current_time = time.time()
         self.last_activity = current_time
         
-    def send_data(self, data):
-        self.send_queue.put(data)
-        # mask = selectors.EVENT_READ | selectors.EVENT_WRITE
-        # self.selector.modify(self.sock, mask)
-        return True
-            
     def _send_data(self, data):
         try:
             if not self.connected or not self.sock:
