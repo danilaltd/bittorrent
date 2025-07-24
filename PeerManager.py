@@ -1,5 +1,5 @@
 from math import pi
-from BlockandPiece import BLOCK_SIZE, Status, Block
+from BlockandPiece import BLOCK_SIZE, Status
 from peer import Peer
 from Messages import Handshake
 from tracker import Tracker
@@ -94,15 +94,13 @@ class PeerManager:
         self.piece_manager = PieceInfo(tracker_obj.torrent_obj)
         self.torrent_completed = False
         self._last_optimistic_unchoke = time.time()
-        self._last_optimistic_unchoke_lock = RWLock("_last_optimistic_unchoke_lock")
         self._optimistic_unchoke_peer: Peer = None
-        self._optimistic_unchoke_peer_lock = RWLock("_optimistic_unchoke_peer_lock")
         self._last_peer_update = time.time()
         self._last_piece_update = time.time()
         self._last_reconnect = time.time()
         self._running = True
         self._rarest_piece_min_heap: list[tuple[int, list[Peer]]] = []
-        self._rarest_piece_min_heap_lock = RWLock("_rarest_piece_min_heap_lock")
+        self._rarest_piece_min_heap_lock = threading.Lock()
         self._download_started = False
         
         self.need_update_pieces = True
@@ -116,12 +114,14 @@ class PeerManager:
         self._peer_update_thread.start()
         
         self.selector = selectors.DefaultSelector()
-        self.send_bufs = {}
-        self.send_views = {}
-        self.send_queues = {}
-        self.receive_queue = queue.Queue()
-        self.recv_bufs = {}
-        self.ip_close_methods = {}
+        
+        self.send_bufs: dict[tuple[str, int] | tuple[str, int, int, int], bytearray] = {}
+        self.send_views: dict[tuple[str, int] | tuple[str, int, int, int], memoryview] = {}
+        self.send_queues: dict[tuple[str, int] | tuple[str, int, int, int], queue.Queue] = {}
+        self.receive_queue: queue.Queue = queue.Queue()
+        self.recv_bufs: dict[tuple[str, int] | tuple[str, int, int, int], bytearray] = {}
+        self.sock_to_peer: dict[socket.socket, Peer] = {}
+        self._handshake_completed: dict[tuple[str, int] | tuple[str, int, int, int], bool] = {}
         
         self._sockets_thread = threading.Thread(target=self._socket_worker_loop)
         self._sockets_thread.daemon = True
@@ -130,90 +130,58 @@ class PeerManager:
         self._reader_thread = threading.Thread(target=self.read_continously_from_sock)
         self._reader_thread.daemon = True
         self._reader_thread.start()
-        
-        
-        
-
-
-    @property
-    def last_optimistic_unchoke(self):
-        with timed_lock(self._last_optimistic_unchoke_lock.read_access, "_last_optimistic_unchoke_lock.read_access"):
-            return self._last_optimistic_unchoke
-    @last_optimistic_unchoke.setter
-    def last_optimistic_unchoke(self, value):
-        with timed_lock(self._last_optimistic_unchoke_lock.write_access, "_last_optimistic_unchoke_lock.write_access"):
-            self._last_optimistic_unchoke = value
-
-    @property
-    def optimistic_unchoke_peer(self):
-        with timed_lock(self._optimistic_unchoke_peer_lock.read_access, "_optimistic_unchoke_peer_lock.read_access"):
-            return self._optimistic_unchoke_peer
-    @optimistic_unchoke_peer.setter
-    def optimistic_unchoke_peer(self, value):
-        with timed_lock(self._optimistic_unchoke_peer_lock.write_access, "_optimistic_unchoke_peer_lock.write_access"):
-            self._optimistic_unchoke_peer = value
-
-    @property
-    def rarest_piece_min_heap(self):
-        with timed_lock(self._rarest_piece_min_heap_lock.read_access, "_rarest_piece_min_heap_lock.read_access"):
-            return self._rarest_piece_min_heap
-    @rarest_piece_min_heap.setter
-    def rarest_piece_min_heap(self, value):
-        with timed_lock(self._rarest_piece_min_heap_lock.write_access, "_rarest_piece_min_heap_lock.write_access"):
-            self._rarest_piece_min_heap = value
-
 
     def _is_peer_in_peers(self, peer: Peer):
-        with timed_lock(self._peers_lock.read_access, "_peers_lock.read_access"):
+        with self._peers_lock.read_access:
             return peer in self._peers
     
     def _add_peer(self, peer: Peer):
-        with timed_lock(self._peers_lock.write_access, "_peers_lock.write_access"):
+        with self._peers_lock.write_access:
             self._peers.append(peer)
             
     def _clear_peers(self):
-        with timed_lock(self._peers_lock.write_access, "_peers_lock.write_access"):
+        with self._peers_lock.write_access:
             self._peers.clear()
             
     def _is_peer_in_peers_ip_port(self, peer: tuple[str, str]):
-        with timed_lock(self._peers_ip_port_lock.read_access, "_peers_ip_port.read_access"):
+        with self._peers_ip_port_lock.read_access:
             return peer in self._peers_ip_port
     
     def _add_peer_ip_port(self, peer: tuple[str, str]):
-        with timed_lock(self._peers_ip_port_lock.write_access, "_peers_ip_port.write_access"):
+        with self._peers_ip_port_lock.write_access:
             self._peers_ip_port.append(peer)
             
     def _clear_peers_ip_port(self):
-        with timed_lock(self._peers_ip_port_lock.write_access, "_peers_ip_port.write_access"):
+        with self._peers_ip_port_lock.write_access:
             self._peers_ip_port.clear()
             
     def _add_connected_peer(self, peer):
-        with timed_lock(self._connected_peers_lock.write_access, "_connected_peers_lock.write_access"):
+        with self._connected_peers_lock.write_access:
             self._connected_peers.append(peer)
         self.request_piece_update()
 
 
     def _remove_connected_peer(self, peer):
-        with timed_lock(self._connected_peers_lock.write_access, "_connected_peers_lock.write_access"):
+        with self._connected_peers_lock.write_access:
             self._connected_peers.remove(peer)
         self.request_piece_update()
 
     def _clear_connected_peers(self):
-        with timed_lock(self._connected_peers_lock.write_access, "_connected_peers_lock.write_access"):
+        with self._connected_peers_lock.write_access:
             self._connected_peers.clear()
         self.request_piece_update()
 
 
     def _get_connected_peers_count(self):
-        with timed_lock(self._connected_peers_lock.read_access, "_connected_peers_lock.read_access"):
+        with self._connected_peers_lock.read_access:
             return len(self._connected_peers)
 
     def _is_peer_connected(self, peer):
-        with timed_lock(self._connected_peers_lock.read_access, "_connected_peers_lock.read_access"):
+        with self._connected_peers_lock.read_access:
             return peer in self._connected_peers
 
     def set_Peer_to_ip_port(self, ip_port, peer: Peer):
-        with timed_lock(self._peers_ip_port_to_Peer_lock.write_access, "_peers_ip_port_to_Peer_lock.write_access"):
+        with self._peers_ip_port_to_Peer_lock.write_access:
             self._peers_ip_port_to_Peer[ip_port] = peer
 
     def _periodic_rarest_piece_update(self):
@@ -236,7 +204,9 @@ class PeerManager:
                 
     def update_rarest_piece_min_heap(self, current_time):
         self._last_piece_update = current_time
-        self.rarest_piece_min_heap = self.getRarestPieceMinHeap()
+        res = self.getRarestPieceMinHeap()
+        with self._rarest_piece_min_heap_lock:
+            self._rarest_piece_min_heap = res
         self.notify()
         
     def request_piece_update(self):
@@ -248,9 +218,9 @@ class PeerManager:
         for i in range(self.piece_manager.number_of_pieces):
             piece_listOfpeers[i] = []
         
-        with timed_lock(self._connected_peers_lock.read_access, "_connected_peers_lock.read_access"):
+        with self._connected_peers_lock.read_access:
             for index in range(self.piece_manager.number_of_pieces):
-                if self.piece_manager.is_piece_empty(index):
+                if not self.piece_manager.is_piece_complete(index):
                     for peer in self._connected_peers:
                         if peer.connected and peer.peer_choking == 0 and peer.is_bit_set_in_bit_field(index):
                             piece_listOfpeers[index].append(peer)
@@ -261,8 +231,6 @@ class PeerManager:
             group_list = list(group)
             random.shuffle(group_list)
             result.extend(group_list)
-        # for _, peers in result: # Сортировка списка пиров по каждому куску по их «оценке»
-            # peers.sort(key=lambda peer: peer.peer_score(), reverse=True) 
         return result
 
     def _periodic_peer_update(self):
@@ -290,7 +258,7 @@ class PeerManager:
         log_info("Updating peer list from tracker...")
         try:
             self._last_peer_update = current_time
-            with timed_lock(self._tracker_obj.peers_lock, "_tracker_obj.peers_lock"):
+            with self._tracker_obj.peers_lock:
                 peers_copy = self._tracker_obj.peers.copy()
             log_info(f"Got {len(peers_copy)} peers")
             for peer_ip_port in peers_copy:
@@ -304,8 +272,8 @@ class PeerManager:
 
     def _reconnect_peers(self):
         try:
-            with timed_lock(self._connected_peers_lock.read_access, "_connected_peers_lock.read_access"):
-                with timed_lock(self._peers_lock.read_access, "_peers_lock.read_access"):
+            with self._connected_peers_lock.read_access:
+                with self._peers_lock.read_access:
                     disconnected_peers = [p for p in self._peers if not (p.connected and p in self._connected_peers) and p.connection_attempts < MAX_CONNECTION_ATTEMPTS]
             if disconnected_peers:
                 log_info(f"Attempting to reconnect to {len(disconnected_peers)} peers...")
@@ -326,7 +294,7 @@ class PeerManager:
         self._running = False
         if self._peer_update_thread.is_alive():
             self._peer_update_thread.join(timeout=5)
-        with timed_lock(self._connected_peers_lock.read_access, "_connected_peers_lock.read_access"):
+        with self._connected_peers_lock.read_access:
             for peer in self._connected_peers:
                 try:
                     peer.close()
@@ -337,43 +305,31 @@ class PeerManager:
         self._clear_peers_ip_port()
         
     def _socket_worker_loop(self):
-        # self.sock.setblocking(False)
-        # self.selector.register(self.sock, selectors.EVENT_READ | selectors.EVENT_WRITE)
         while self._running:
-            # print(f"send: {self.se.qsize()}; rec: {self.receive_queue.qsize()}")
+            # print(f"{self._get_connected_peers_count()} {len(self.selector.get_map())}")
             # print(f"rec: {self.receive_queue.qsize()}")
             events = self.selector.select(timeout=1)
             for key, mask in events:
-            # for i, (key, mask) in enumerate(events):
                 sock = key.fileobj
-                # print(f"i: {i}")
-                # try:
-                #     ip_port = sock.getpeername()
-                #     print(f"{ip}: send: {self.send_queues[ip].qsize()}; rec: {self.recv_queues[ip].qsize()}")
-                # except:
-                #     pass
                 try:
                     if mask & selectors.EVENT_READ:
                         self._handle_read(sock)
                 except OSError as e:
-                    ip, close = self.ip_close_methods[sock]
-                    self.selector.unregister(sock)
-                    close()
-                    print(f"read: closing {ip}")
+                    ip_port = self._unregister_peer(sock)
+                    log_error(f"read: closed {ip_port} {e}")
                     continue
                 except Exception as e:
-                    print(f"_socket_worker_loop_read: {e}")
+                    log_error(f"_socket_worker_loop_read: {e}")
+                
                 try:
                     if mask & selectors.EVENT_WRITE:
                         self._handle_write(sock)
                 except OSError as e:
-                    ip, close = self.ip_close_methods[sock]
-                    self.selector.unregister(sock)
-                    close()
-                    print(f"read: closing {ip}")
+                    ip_port = self._unregister_peer(sock)
+                    log_error(f"write: closed {ip_port} {e}")
                     continue
                 except Exception as e:
-                    print(f"_socket_worker_loop_write: {e}") #  \n{traceback.format_exc()}
+                    log_error(f"_socket_worker_loop_write: {e}") #  \n{traceback.format_exc()}
             
     def _handle_write(self, sock: socket.socket):
         """Send as much data from send_buf and send_queue as socket allows."""
@@ -383,12 +339,16 @@ class PeerManager:
         send_view = self.send_views[ip_port]
         send_buf = self.send_bufs[ip_port]
         if send_view is None:
-            while not send_buf:
+            # i = 0
+            # while not send_buf:
+            while True:
                 try:
                     chunk = send_queue.get_nowait()
+                    # i += 1
                     send_buf.extend(chunk)
                 except queue.Empty:
                     break
+            # print(f"{ip_port}: send {i}/{send_queue.qsize()}")
             if send_buf:
                 send_view = memoryview(send_buf)
 
@@ -401,34 +361,39 @@ class PeerManager:
                         send_view = None
                         send_buf.clear()
                 else:
-                    # self.connected = False
-                    log_error(f"sent == 0")
+                    raise OSError(f"sent == 0")
             except BlockingIOError:
                 log_error("BlockingIOError")
                 pass
 
-    def _handle_read(self, sock):
+    def _handle_read(self, sock: socket.socket):
         ip_port = sock.getpeername()
         recv_buf = self.recv_bufs[ip_port]
         try:
-            data = sock.recv(8192)
+            data = sock.recv(1048576)
             if not data:
                 # connection closed by peer
-                print(f"close: {ip_port}")
                 raise OSError("not sock.recv(8192) -> connection closed")
             recv_buf.extend(data)
 
-            # parse complete messages: 4-byte big-endian length + payload
             offset = 0
-            while len(recv_buf) - offset >= 4:
-                length = struct.unpack_from('>I', recv_buf, offset)[0]
-                if len(recv_buf) - offset < 4 + length:
-                    break
-                start = offset + 4
-                end = start + length
-                msg = bytes(recv_buf[offset:end])
-                self.receive_queue.put((ip_port, recv_buf[offset:end]))
-                offset = end
+            
+            if not self._handshake_completed[ip_port]:
+                if len(recv_buf) >= 68:
+                    handshake_msg = bytes(recv_buf[:68])
+                    self.receive_queue.put((ip_port, handshake_msg))
+                    offset = 68
+                    self._handshake_completed[ip_port] = True
+            else:
+                while len(recv_buf) - offset >= 4:
+                    length = struct.unpack_from('>I', recv_buf, offset)[0]
+                    if len(recv_buf) - offset < 4 + length:
+                        break
+                    start = offset + 4
+                    end = start + length
+                    msg = bytes(recv_buf[offset:end])
+                    self.receive_queue.put((ip_port, msg))
+                    offset = end
 
             # remove parsed bytes
             if offset > 0:
@@ -440,13 +405,13 @@ class PeerManager:
 
     def getMessage(self):
         try:
-            data = self.receive_queue.get_nowait()   
+            data = self.receive_queue.get()   
             return data
         except: 
             return None
 
     def get_peer_by_ip_port(self, ip_port) -> Peer:
-        with timed_lock(self._peers_ip_port_to_Peer_lock.read_access, "_peers_ip_port_to_Peer_lock.read_access"):
+        with self._peers_ip_port_to_Peer_lock.read_access:
             return self._peers_ip_port_to_Peer[ip_port]
 
     def read_continously_from_sock(self):
@@ -461,165 +426,182 @@ class PeerManager:
                             message_length = msg[:4]
                             
                             if not message_length:
-                                log_error(f"Invalid message length from {peer.ip_port}: {len(message_length)}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                                log_error(f"Invalid message length from {peer.ip_port}: {len(message_length)}", flags = ['Reading'], name=f'{peer.ip_port}.log')
                                 continue
                                 
                             message_length = struct.unpack(">I", message_length)[0]
-                            # log_info(f"{peer.ip_port}: got message with {message_length} bytes", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                            # log_info(f"{peer.ip_port}: got message with {message_length} bytes", flags = ['Reading'], name=f'{peer.ip_port}.log')
                             if message_length == 0:
                                 continue
-                                
-                            message_ID = msg[4:5]
-                            if not message_ID:
-                                log_error(f"Invalid message ID from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                continue
-                                
-                            message_ID_u = struct.unpack(">B", message_ID)[0]
                             
-                            if message_ID_u == 0:  # Choke
-                                peer.peer_choking = 1
-                                self.request_piece_update()
-                                log_info(f"Peer {peer.ip_port} choked us", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                            elif message_ID_u == 1:  # Unchoke
-                                peer.peer_choking = 0
-                                self.request_piece_update()
-                                log_info(f"Peer {peer.ip_port} unchoked us", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                            elif message_ID_u == 2:  # Interested
-                                peer.peer_interested = 1
-                                log_info(f"Peer {peer.ip_port} is interested", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                            elif message_ID_u == 3:  # Not interested
-                                peer.peer_interested = 0
-                                log_info(f"Peer {peer.ip_port} is not interested", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                            elif message_ID_u == 4:  # Have
-                                if message_length - 1 == 4:
-                                    piece_index = msg[5:9]
-                                    if piece_index:
-                                        piece_index = struct.unpack(">I", piece_index)[0]
-                                    else:
-                                        log_error(f"{peer.ip_port} 'have' message: couldn't read piece_index", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                        continue
-                                    if peer.set_bit_in_bit_field(piece_index):
-                                        log_info(f"{peer.ip_port} 'have' message received for piece {piece_index}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                        self.request_piece_update()
-                                    else:
-                                        log_info(f"{peer.ip_port} 'have' message: piece_index ({piece_index}, more or eq than {len(peer.bit_field)}) or already set", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                else:
-                                    log_error(f"{peer.ip_port} 'have' message: wrong length ({message_length}, not 5)", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                        
-                            elif message_ID_u == 5:  # Bitfield
-                                bitfield_length = message_length - 1
-                                
-                                bitfield_data = msg[5:5 + bitfield_length]
-                                if bitfield_data:
-                                    if len(bitfield_data) == bitfield_length:
-                                        peer.set_bit_field(bitfield_data)
-                                        self.request_piece_update()
-                                        log_info(f"Received valid bitfield from {peer.ip_port}: length is {len(bitfield_data)}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                    else:
-                                        log_error(f"Received invalid bitfield from {peer.ip_port}: length is {len(bitfield_data)}, need {bitfield_length}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                else:
-                                    log_error(f"bitfield: couldn't read bitfield_data", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                    
-                            elif message_ID_u == 6:  # Request
-                                # log_info(f"Received request from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                data = msg[5:17]
-                                if data:
-                                    pass
-                                else:
-                                    log_error(f"Request: couldn't read request data", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                    
-                                if len(data) < 12:
-                                    continue
-                            elif message_ID_u == 7:  # Piece
+                            if peer.connecting:
                                 try:
-                                    piece_index_b = msg[5:9]
-                                    if not piece_index_b:
-                                        log_error(f"Invalid piece_index_b from {peer.ip_port}: {piece_index_b}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                        continue
-                                    block_offset_b = msg[9:13]
-                                    if not block_offset_b:
-                                        log_error(f"Invalid piece_index_b from {peer.ip_port}: {block_offset_b}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                        continue
-                                    piece_index = struct.unpack(">I", piece_index_b)[0]
-                                    block_offset = struct.unpack(">I", block_offset_b)[0]
-                                    peer.pending_requests -= 1
-                                    # Validate piece index
-                                    # if piece_index >= self.piece_manager.number_of_pieces:
-                                    #     log_error(f"Invalid piece index {piece_index} from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                    #     continue
+                                    if len(msg) == 68:
+                                        if msg[0] != 19 or msg[1:20] != b'BitTorrent protocol':
+                                            raise Exception(f"Invalid handshake protocol")
+                                
+                                        received_info_hash = msg[28:48]
+                                        if received_info_hash != self._tracker_obj.torrent_obj.info_hash:
+                                            raise Exception(f"Info hash mismatch")
+                                
+                                        peer.handshake_received = True
+                                        log_info(f"Handshake successful with {peer.ip_port}")
                                         
-                                    block_index = block_offset // BLOCK_SIZE
-                                    
-                                    # # Get piece safely
-                                    # if not self.piece_manager.is_index_valid(piece_index):
-                                    #     log_error(f"Invalid piece index {piece_index} from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                    #     continue
-                                    
-                                    # # Validate block index
-                                    # if block_index >= self.piece_manager.get_blocks_len(piece_index):
-                                    #     log_error(f"Invalid block index {block_index} for piece {piece_index} from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                    #     continue
-                                    
-                                    block_data = msg[13:message_length + 4]
-                                    if block_data is None:
-                                        log_error(f"Invalid piece {piece_index} from {peer.ip_port}: couldn't read data", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                        continue
-                                        
-                                    # Update block status safely
-                                    # log_info(f"{peer.ip_port}: update {piece_index}:{block_index}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-
-                                    # self.piece_manager.update_block_status_safe(piece_index, block_index, Status.DOWNLOADED, block_data)
-                                    if self.piece_manager.update_block_status_safe(piece_index, block_index, Status.DOWNLOADED, block_data):
-                                    # if Logger.measure_time(self.piece_manager.update_block_status_safe, "_10", piece_index, block_index, Status.DOWNLOADED, block_data):
-                                    # self.piece_manager.update_block_status_safe(piece_index, block_index, Status.DOWNLOADED, block_data)
-                                        peer.blocks_recieved += 1
-                                        self.piece_manager.downloaded_blocks += 1
-                                    # else:
-                                        # log_error(f"Error in update_block_status_safe for {piece_index}:{block_index} from {peer.ip_port}: couldn't read data", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                        # Request next block if piece is not complete
-                                        # if self.piece_manager.is_piece_empty(piece_index):
-                                        # if Logger.measure_time(self.piece_manager.is_piece_empty, "_11", piece_index):
-                                    # self.prefetch_next_blocks(piece_index, peer)
-                                            # Logger.measure_time(self.prefetch_next_blocks, "_12", piece_index, peer)
-                                    
-                                    # print(f"read sock wrote {piece_index}")
-                                        
-                                except struct.error as e:
-                                    log_error(f"Error unpacking piece message from {peer.ip_port}", e, flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                                    continue
+                                        if not self._is_peer_connected(peer):    
+                                            self._add_connected_peer(peer)
+                                            
+                                        self.send_data(peer.ip_port, interested().byteStringForInterested())
+                                        peer.am_interested = 1
+                                        log_info(f"Successfully connected to peer {peer.ip_port}")
+                                        peer.connecting = False
                                 except Exception as e:
-                                    log_error(f"Error processing piece message from {peer.ip_port}", e)
-                                    continue
+                                    log_error(f"Handshake error for {peer.ip_port}", e)
+                                    peer.bad_peer = True
                             else:
-                                log_error(f"Unsupported message from {peer.ip_port}: message length: {message_length}, id: {message_ID_u}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                                message_ID = msg[4:5]
+                                if not message_ID:
+                                    log_error(f"Invalid message ID from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                    continue
+                                    
+                                message_ID_u = struct.unpack(">B", message_ID)[0]
+                                
+                                if message_ID_u == 0:  # Choke
+                                    peer.peer_choking = True
+                                    self.request_piece_update()
+                                    log_info(f"Peer {peer.ip_port} choked us", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                elif message_ID_u == 1:  # Unchoke
+                                    peer.peer_choking = False
+                                    self.request_piece_update()
+                                    log_info(f"Peer {peer.ip_port} unchoked us", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                elif message_ID_u == 2:  # Interested
+                                    peer.peer_interested = 1
+                                    log_info(f"Peer {peer.ip_port} is interested", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                elif message_ID_u == 3:  # Not interested
+                                    peer.peer_interested = 0
+                                    log_info(f"Peer {peer.ip_port} is not interested", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                elif message_ID_u == 4:  # Have
+                                    if message_length - 1 == 4:
+                                        piece_index = msg[5:9]
+                                        if piece_index:
+                                            piece_index = struct.unpack(">I", piece_index)[0]
+                                        else:
+                                            log_error(f"{peer.ip_port} 'have' message: couldn't read piece_index", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                            continue
+                                        if peer.set_bit_in_bit_field(piece_index):
+                                            log_info(f"{peer.ip_port} 'have' message received for piece {piece_index}", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                            self.request_piece_update()
+                                        else:
+                                            log_info(f"{peer.ip_port} 'have' message: piece_index ({piece_index}, more or eq than {len(peer.bit_field)}) or already set", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                    else:
+                                        log_error(f"{peer.ip_port} 'have' message: wrong length ({message_length}, not 5)", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                elif message_ID_u == 5:  # Bitfield
+                                    bitfield_length = message_length - 1
+                                    
+                                    bitfield_data = msg[5:5 + bitfield_length]
+                                    if bitfield_data:
+                                        if len(bitfield_data) == bitfield_length:
+                                            peer.set_bit_field(bitfield_data)
+                                            self.request_piece_update()
+                                            log_info(f"Received valid bitfield from {peer.ip_port}: length is {len(bitfield_data)}", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                        else:
+                                            log_error(f"Received invalid bitfield from {peer.ip_port}: length is {len(bitfield_data)}, need {bitfield_length}", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                    else:
+                                        log_error(f"bitfield: couldn't read bitfield_data", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                elif message_ID_u == 6:  # Request
+                                    # log_info(f"Received request from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                    data = msg[5:17]
+                                    if data:
+                                        pass
+                                    else:
+                                        log_error(f"Request: couldn't read request data", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                        
+                                    if len(data) < 12:
+                                        continue
+                                elif message_ID_u == 7:  # Piece
+                                    try:
+                                        piece_index_b = msg[5:9]
+                                        if not piece_index_b:
+                                            log_error(f"Invalid piece_index_b from {peer.ip_port}: {piece_index_b}", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                            continue
+                                        block_offset_b = msg[9:13]
+                                        if not block_offset_b:
+                                            log_error(f"Invalid piece_index_b from {peer.ip_port}: {block_offset_b}", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                            continue
+                                        piece_index = struct.unpack(">I", piece_index_b)[0]
+                                        block_offset = struct.unpack(">I", block_offset_b)[0]
+                                        block_index = block_offset // BLOCK_SIZE
+                                        
+                                        block_data = msg[13:message_length + 4]
+                                        if block_data is None:
+                                            log_error(f"Invalid piece {piece_index} from {peer.ip_port}: couldn't read data", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                            continue
+                                            
+
+                                        if self.piece_manager.update_block_status_safe(piece_index, block_index, Status.DOWNLOADED, block_data, requested_by=peer):
+                                            pass
+                                    except struct.error as e:
+                                        log_error(f"Error unpacking piece message from {peer.ip_port}", e, flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                        continue
+                                    except Exception as e:
+                                        log_error(f"Error processing piece message from {peer.ip_port}", e)
+                                        continue
+                                else:
+                                    log_error(f"Unsupported message from {peer.ip_port}: message length: {message_length}, id: {message_ID_u}", flags = ['Reading'], name=f'{peer.ip_port}.log')
                                 
                                             
-                        except socket.timeout:
-                            continue
-                        except ConnectionResetError:
-                            log_error(f"Connection reset by peer {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-                            break
                         except Exception as e:
-                            log_error(f"Error reading from {peer.ip_port}", e, flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
+                            log_error(f"Error reading from {peer.ip_port}", e, flags = ['Reading'], name=f'{peer.ip_port}.log')
                             break
-                    else:
-                        log_error("empty")
+                # else:
+                    # log_error("empty")
                         
         except Exception as e:
-            log_error(f"Fatal error in read thread for {peer.ip_port} {traceback.format_exc()}", e, flags = ['Reading'], name=f'{peer.ip_port}({threading.current_thread().name}).log')
-        finally:
-            if self._is_peer_connected(peer):
-                self._remove_connected_peer(peer)
-                    
-            try:
-                peer.sock.close()
-            except:
-                pass
+            log_error(f"Fatal error in read thread for {ip_port} {traceback.format_exc()}", e, flags = ['Reading'], name=f'{ip_port}.log')
+
         
     def launch_thread(self, peer: Peer):
         p = threading.Thread(target=self.MultiThreadedConnection, args=(peer,))
         p.daemon = True
         p.start()
+    
+    def _register_peer(self, peer: Peer):
+        sock = peer.sock
+        sock.setblocking(False)
+        ip_port = sock.getpeername()
+        self.send_bufs[ip_port] = bytearray()
+        self.send_views[ip_port] = None
+        self.send_queues[ip_port] = queue.Queue()
+        self.recv_bufs[ip_port] = bytearray()
+        self.sock_to_peer[sock] = peer
+        self._handshake_completed[ip_port] = False
+        self.selector.register(sock, selectors.EVENT_READ | selectors.EVENT_WRITE)
+        
+    def _unregister_peer(self, sock: socket.socket):
+        try:
+            peer = self.sock_to_peer.pop(sock)
+        except KeyError:
+            return
+        ip_port = peer.ip_port
+        self.send_bufs.pop(ip_port, None)
+        self.send_views.pop(ip_port, None)
+        self.send_queues.pop(ip_port, None)
+        self.recv_bufs.pop(ip_port, None)
+        self._handshake_completed.pop(ip_port, None)
+        
+        if self._is_peer_connected(peer):
+            self._remove_connected_peer(peer)
+
+        try:
+            self.selector.unregister(sock)
+        except Exception:
+            pass 
+
+        try:
+            peer.close()
+        except Exception:
+            pass
+        
+        return ip_port
     
     def MultiThreadedConnection(self, peer:Peer):
         # if peer.ip != '5.79.98.162' and peer.ip != '90.240.225.228':
@@ -641,134 +623,25 @@ class PeerManager:
                 peer.bad_peer = True
                 return
                 
-            # Set socket timeout for handshake
-            sock.settimeout(5)  # Increased from 15 to 20 seconds
-            
-            # Send handshake with retry mechanism
-            handshake = Handshake(self._tracker_obj.torrent_obj.peer_id, self._tracker_obj.torrent_obj.info_hash)
-            handshake_success = False
-            
-            handshake_bytes = handshake.getHandshakeBytes()
-            max_retries = 3
-            for attempt in range(max_retries):  # Try handshake up to 3 times
-                try:
-                    peer._send_data(handshake_bytes)
-                    peer.handshake_sent = True
-                    
-                    # Read handshake response with retry
-                    data = None
-                    try:
-                        data = peer._read_bytes_from_sock(68)
-                        if not data:
-                            raise Exception("no data with 68 bytes")
-                    except socket.timeout:
-                        log_error(f"Handshake timeout for {peer.ip_port} after {attempt + 1} attempts")
-                        time.sleep(1)
-                        continue
-                    except Exception as e:
-                        log_error(f"Error receiving handshake from {peer.ip_port} after {attempt + 1} attempts", e)
-                        time.sleep(1)
-                        continue
-                    
-                    if len(data) == 68:
-                        # Verify handshake response
-                        if data[0] != 19 or data[1:20] != b'BitTorrent protocol':
-                            raise(f"Invalid handshake protocol")
-                            break
-                            
-                        # Verify info hash
-                        received_info_hash = data[28:48]
-                        if received_info_hash != self._tracker_obj.torrent_obj.info_hash:
-                            raise(f"Info hash mismatch")
-                            break
-                            
-                        peer.handshake_received = True
-                        handshake_success = True
-                        log_info(f"Handshake successful with {peer.ip_port}")
-                        break
-                        
-                except socket.timeout:
-                    log_error(f"Handshake timeout for {peer.ip_port}")
-                    if attempt == 2:  # Last attempt
-                        peer.bad_peer = True
-                        return
-                    time.sleep(1)
-                    continue
-                except Exception as e:
-                    log_error(f"Handshake error for {peer.ip_port}", e)
-                    if attempt == 2:  # Last attempt
-                        peer.bad_peer = True
-                        return
-                    time.sleep(1)
-                    continue
-            
-            if not handshake_success:
-                peer.bad_peer = True
-                return
-                
-            # Add peer to connected list with proper locking
+            self._register_peer(peer)
             if not self._is_peer_in_peers(peer):
                 self._add_peer(peer)
             if not self._is_peer_in_peers_ip_port((peer.ip, peer.port)):
                 self._add_peer_ip_port((peer.ip, peer.port))
             self.set_Peer_to_ip_port(peer.ip_port, peer)
-            if not self._is_peer_connected(peer):    
-                self._add_connected_peer(peer)
-            peer.sock = sock
+            handshake = Handshake(self._tracker_obj.torrent_obj.peer_id, self._tracker_obj.torrent_obj.info_hash)
             
-            # Send interested message with retry
-            interested_sent = False
-            interested_message = interested().byteStringForInterested()
-            for attempt in range(max_retries):
-                try:
-                    if peer._send_data(interested_message):
-                        peer.am_interested = 1
-                    interested_sent = True
-                    break
-                except Exception as e:
-                    if attempt == 2:  # Last attempt
-                        log_error(f"Error sending interested message to {peer.ip_port}", e)
-                        peer.bad_peer = True
-                        return
-                    time.sleep(1)
-            
-            if not interested_sent:
-                peer.bad_peer = True
-                return
+            handshake_bytes = handshake.getHandshakeBytes()
+            self.send_data(peer.ip_port, handshake_bytes)
+            peer.handshake_sent = True
                 
-            sock.settimeout(None) 
-            sock.setblocking(False)
-            ip_port = sock.getpeername()
-            self.send_bufs[ip_port] = bytearray()
-            self.send_views[ip_port] = None
-            self.send_queues[ip_port] = queue.Queue()
-            self.recv_bufs[ip_port] = bytearray()
-            self.ip_close_methods[sock] = (ip_port, peer.close)
-            self.selector.register(sock, selectors.EVENT_READ | selectors.EVENT_WRITE)
-            
-            log_info(f"Successfully connected to peer {peer.ip_port}")
             
         except Exception as e:
             log_error(f"Connection error for {peer.ip_port} \nTraceback:\n{traceback.format_exc()}", e)
-            if self._is_peer_connected(peer):
-                self._remove_connected_peer(peer)
-        finally:
-            peer.connecting = False
-            if sock is not None and not peer.connected:
-                try:
-                    sock.shutdown(socket.SHUT_RDWR)
-                except:
-                    pass
-                try:
-                    sock.close()
-                except:
-                    pass
-        # if peer.connected:
-            # threading.current_thread().name = "read"
-            # self.read_continously_from_sock(peer)
 
     def send_data(self, ip_port, data):
         self.send_queues[ip_port].put(data)
+        # print(self.send_queues[ip_port].qsize())
         
 
     def prefetch_next_blocks(self, piece_index, peer: Peer):
@@ -776,11 +649,8 @@ class PeerManager:
         for block_index in self.piece_manager.get_empty_blocks(piece_index):
             try:
                 current_time = time.time()
-                peer.pending_requests += 1
-                peer.requests_sent += 1
-                peer.last_request_time = current_time
                 self.send_data(peer.ip_port, request(piece_index, block_index * BLOCK_SIZE, self.piece_manager.get_block_size(piece_index, block_index)).byteStringForRequest())
-                self.piece_manager.update_block_status_safe(piece_index, block_index, Status.REQUESTED, last_requested=current_time)                            
+                self.piece_manager.update_block_status_safe(piece_index, block_index, Status.REQUESTED, last_requested=current_time, requested_by = peer)                            
                     
             except Exception as e:
                 log_error(f"Error requesting next block: {piece_index}:{block_index}", e)
@@ -791,45 +661,43 @@ class PeerManager:
     def update_optimistic_unchoke(self):
         """Update optimistic unchoke every 30 seconds"""
         current_time = time.time()
-        if current_time - self.last_optimistic_unchoke >= OPTIMISTIC_UNCHOKE_INTERVAL:
+        if current_time - self._last_optimistic_unchoke >= OPTIMISTIC_UNCHOKE_INTERVAL:
             # Find a random choked peer that we're interested in
-            with timed_lock(self._connected_peers_lock.read_access, "_connected_peers_lock.read_access"):
+            with self._connected_peers_lock.read_access:
                 choked_peers = [p for p in self._connected_peers if p.peer_choking and p.am_interested]
             if choked_peers:
                 # Unchoke the previous optimistic peer if it exists
-                if self.optimistic_unchoke_peer and self._is_peer_connected(self.optimistic_unchoke_peer):
+                if self._optimistic_unchoke_peer and self._is_peer_connected(self._optimistic_unchoke_peer):
                     try:
                         unchoke_msg = unchoke()
-                        self.send_data(self.optimistic_unchoke_peer.ip_port, unchoke_msg.byteStringForUnchoke())
-                        self.optimistic_unchoke_peer.am_choking = 0
+                        self.send_data(self._optimistic_unchoke_peer.ip_port, unchoke_msg.byteStringForUnchoke())
+                        self._optimistic_unchoke_peer.am_choking = 0
                     except Exception as e:
-                        log_error(f"Error sending optimistic unchoke to {self.optimistic_unchoke_peer.ip_port}", e)
+                        log_error(f"Error sending optimistic unchoke to {self._optimistic_unchoke_peer.ip_port}", e)
                 
                 # Select new optimistic peer
-                self.optimistic_unchoke_peer = random.choice(choked_peers)
+                self._optimistic_unchoke_peer = random.choice(choked_peers)
                 try:
                     unchoke_msg = unchoke()
-                    self.send_data(self.optimistic_unchoke_peer.ip_port, unchoke_msg.byteStringForUnchoke())
-                    self.optimistic_unchoke_peer.am_choking = 0
-                    log_info(f"Optimistic unchoke for {self.optimistic_unchoke_peer.ip_port}")
+                    self.send_data(self._optimistic_unchoke_peer.ip_port, unchoke_msg.byteStringForUnchoke())
+                    self._optimistic_unchoke_peer.am_choking = 0
+                    log_info(f"Optimistic unchoke for {self._optimistic_unchoke_peer.ip_port}")
                 except Exception as e:
-                    log_error(f"Error sending optimistic unchoke to {self.optimistic_unchoke_peer.ip_port}", e)
+                    log_error(f"Error sending optimistic unchoke to {self._optimistic_unchoke_peer.ip_port}", e)
             
-            self.last_optimistic_unchoke = current_time
+            self._last_optimistic_unchoke = current_time
 
     def get_rarest_piece_min_heap_copy(self):
-        return self.rarest_piece_min_heap.copy()
+        with self._rarest_piece_min_heap_lock:
+            return self._rarest_piece_min_heap.copy()
 
     def get_connected_peers_for_stats(self):
-        with timed_lock(self._connected_peers_lock.read_access, "_connected_peers_lock.read_access"):
+        with self._connected_peers_lock.read_access:
             return self._connected_peers.copy()
 
     def get_peers_for_progress(self):
-        with timed_lock(self._peers_lock.read_access, "_peers_lock.read_access"):
+        with self._peers_lock.read_access:
             return self._peers.copy()
-
-    def is_peer_connected(self, peer):
-        return self._is_peer_connected(peer)
 
     def print_lock_statistics(self):
         """Выводит статистику использования locks для этого объекта"""

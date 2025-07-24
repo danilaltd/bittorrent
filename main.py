@@ -113,8 +113,8 @@ class Bittorrent:
 
     def _initialize(self):
         self.tracker.start_periodic_updates()
-        # self.file_thread = threading.Thread(target=self.peer_manager.piece_manager.write_into_file_safe)
-        # self.file_thread.start()
+        self.file_thread = threading.Thread(target=self.peer_manager.piece_manager.write_into_file_safe)
+        self.file_thread.start()
 
     def _download_loop(self):
         # Start monitor thread
@@ -199,8 +199,7 @@ class Bittorrent:
         self.peer_manager.exitPeerThreads()
         self.file_thread.join()
         
-    def monitor_block_timeouts(self, check_interval=5, timeout=15):
-        time.sleep(100000)
+    def monitor_block_timeouts(self, check_interval=5, timeout=25):
         while self.running:
             self.peer_manager.piece_manager.monitor_block_timeouts_safe(timeout)
             time.sleep(check_interval)
@@ -229,8 +228,10 @@ if __name__ == "__main__":
     # torrent = r'.\torrents\music.torrent'
     # path = r"./down"
     
-    torrent = os.path.join('torrents', 'The_Jackbox_Party_Pack_3_MANY_PEERS_680MB.torrent')
+    # torrent = os.path.join('torrents', 'The_Jackbox_Party_Pack_3_MANY_PEERS_680MB.torrent')
+    # torrent = os.path.join('torrents', 'REPO_300.torrent')
     # torrent = os.path.join('torrents', 'music.torrent')
+    torrent = os.path.join('torrents', 'Photoshop_4gb.torrent')
     path = os.path.join('.', 'down')
     b = Bittorrent()
     b.start_downloading(torrent, path)

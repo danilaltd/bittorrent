@@ -3,7 +3,7 @@ from logger import timed_lock
 
 class RWLock:
     """ Non-reentrant write-preferring rwlock. """
-    DEBUG = 1
+    DEBUG = 0
 
     def __init__(self, name):
         self.lock = threading.Lock()

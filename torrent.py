@@ -32,7 +32,7 @@ class Torrent:
             self.multipleFiles = True
             self.files = self.contents["info"]["files"]
         else:
-            file_dictionary = {"length" : self.contents["info"]["length"], "path" : ""}
+            file_dictionary = {"length" : self.contents["info"]["length"], "path" : [self.contents["info"]["name"]]}
             self.files = [file_dictionary]
         self.name = self.contents["info"]["name"]
         self.piece_length = self.contents["info"]["piece length"]
