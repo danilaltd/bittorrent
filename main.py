@@ -163,9 +163,9 @@ class Bittorrent:
                     # print()
                     if best_peer and best_peer.peer_score() > NEG_INF:
                         i += self.peer_manager.prefetch_next_blocks(piece_i, best_peer)
-                    # else:
-                        # print("skip")
-            if not sent:
+                    else:
+                        time.sleep(0.5)
+            if not sent or i == 0:
                 Logger.info("No peers available. Retrying...")
                 time.sleep(1)
         except Exception as e:
@@ -231,7 +231,8 @@ if __name__ == "__main__":
     # torrent = os.path.join('torrents', 'The_Jackbox_Party_Pack_3_MANY_PEERS_680MB.torrent')
     # torrent = os.path.join('torrents', 'REPO_300.torrent')
     # torrent = os.path.join('torrents', 'music.torrent')
-    torrent = os.path.join('torrents', 'Photoshop_4gb.torrent')
+    # torrent = os.path.join('torrents', 'Photoshop_4gb.torrent')
+    torrent = os.path.join('torrents', '1PieceManyManyFiles.torrent')
     path = os.path.join('.', 'down')
     b = Bittorrent()
     b.start_downloading(torrent, path)

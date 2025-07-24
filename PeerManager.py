@@ -255,7 +255,6 @@ class PeerManager:
                 time.sleep(5)
 
     def _update_peers(self, current_time):
-        log_info("Updating peer list from tracker...")
         try:
             self._last_peer_update = current_time
             with self._tracker_obj.peers_lock:
@@ -646,17 +645,19 @@ class PeerManager:
 
     def prefetch_next_blocks(self, piece_index, peer: Peer):
         """Request next blocks from the same piece following BitTorrent protocol"""
+        sent = False
         for block_index in self.piece_manager.get_empty_blocks(piece_index):
             try:
                 current_time = time.time()
                 self.send_data(peer.ip_port, request(piece_index, block_index * BLOCK_SIZE, self.piece_manager.get_block_size(piece_index, block_index)).byteStringForRequest())
                 self.piece_manager.update_block_status_safe(piece_index, block_index, Status.REQUESTED, last_requested=current_time, requested_by = peer)                            
+                sent = True
                     
             except Exception as e:
                 log_error(f"Error requesting next block: {piece_index}:{block_index}", e)
                 raise
             
-        return 1
+        return sent
 
     def update_optimistic_unchoke(self):
         """Update optimistic unchoke every 30 seconds"""

@@ -153,42 +153,6 @@ class PieceInfo:
             res += block
         return res
         
-    def _load_files(self):
-        files_by_piece = {}
-        piece_offset = 0
-        piece_length = self.torrent.piece_length
-
-        for file_info in self.torrent.files:
-            remaining = file_info['length']
-            file_offset = 0
-            path = file_info['path']
-
-            while remaining > 0:
-                piece_index, offset_in_piece = divmod(piece_offset, piece_length)
-                # space left in current piece
-                space_left = piece_length - offset_in_piece
-                chunk = min(remaining, space_left)
-
-
-                block = {
-                    'length': chunk,
-                    'piece_index': piece_index,
-                    'file_offset': file_offset,
-                    'piece_offset': offset_in_piece,
-                    'path': path
-                }
-                files_by_piece.setdefault(piece_index, []).append(block)
-
-
-                # advance counters
-                remaining -= chunk
-                piece_offset += chunk
-                file_offset += chunk
-
-        return files_by_piece
-
-        
-    
     def _print_progress_bar_internal(self, suffix, decimals, print_matrix, peers):
         """Internal method for printing progress bar without locks"""
         # Calculate download speed
@@ -407,7 +371,7 @@ class PieceInfo:
         piece_size = self._get_piece_size(piece_index)
         number_of_blocks = (piece_size + BLOCK_SIZE - 1) // BLOCK_SIZE
         if number_of_blocks > 1:
-            if number_of_blocks - 1 == block_index == piece_size % BLOCK_SIZE > 0:
+            if number_of_blocks - 1 == block_index and piece_size % BLOCK_SIZE > 0:
                 res = piece_size % BLOCK_SIZE
             else:
                 res = BLOCK_SIZE
@@ -475,6 +439,43 @@ class PieceInfo:
             self._status_counts[cur.value] += 1
             self._pieces_statuses[piece_index] = cur
     
+    
+    def _load_files(self):
+        files_by_piece = {}
+        piece_offset = 0
+        piece_length = self.torrent.piece_length
+
+        for file_info in self.torrent.files:
+            remaining = file_info['length']
+            file_offset = 0
+            path = file_info['path']
+
+            while remaining > 0:
+                piece_index, offset_in_piece = divmod(piece_offset, piece_length)
+                # space left in current piece
+                space_left = piece_length - offset_in_piece
+                chunk = min(remaining, space_left)
+
+
+                block = {
+                    'length': chunk,
+                    'piece_index': piece_index,
+                    'file_offset': file_offset,
+                    'piece_offset': offset_in_piece,
+                    'path': path
+                }
+                files_by_piece.setdefault(piece_index, []).append(block)
+                if piece_index == 623:
+                    print(block)
+
+                # advance counters
+                remaining -= chunk
+                piece_offset += chunk
+                file_offset += chunk
+
+        return files_by_piece
+    
+    
     def write_into_file_safe(self):
         
         base = Path(self.torrent.total_path)
@@ -511,10 +512,16 @@ class PieceInfo:
                 chunk = data[start:end]
                 fd.seek(entry['file_offset'])
                 fd.write(chunk)
-
+                fd.flush()
                 i += 1
 
-            # print(i)
+            print(i)
+            
+        for fd in open_files.values():
+            fd.flush()
+            os.fsync(fd.fileno())
+            fd.close()
+
             
     def print_lock_statistics(self):
         """Выводит статистику использования locks для этого объекта"""
