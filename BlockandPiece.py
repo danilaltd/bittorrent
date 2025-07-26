@@ -73,14 +73,10 @@ class Piece:
         res = []
         if self._cur_status == Status.REQUESTED:
             cur_time = time.time()
-            in_cycle = False
             with self._block_last_requested_lock.read_access:
                 for i in self.get_requested_blocks():
-                    in_cycle = True
                     if cur_time - self._block_last_requested[i] > timeout:
                         res.append(i)
-            if not in_cycle:
-                print("no req blocks in req cycle")
         return res
                         
             #  if (state == Status.DOWNLOADED and self._block_states[block_index] != state == Status.REQUESTED) or (state == Status.REQUESTED and self._block_states[block_index] != state == Status.EMPTY):

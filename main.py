@@ -1,6 +1,6 @@
 from Messages import keep_alive
 from peer import Peer
-from tracker import Tracker
+from TrackersManager import TrackersManager
 from PeerManager import PeerManager
 from BlockandPiece import BLOCK_SIZE, Status
 import threading
@@ -95,7 +95,7 @@ class Bittorrent:
     
     def start_downloading(self, torrent, path):
         self._clear_logs_directory()
-        self.tracker = Tracker(torrent, path)
+        self.tracker = TrackersManager(torrent, path)
         self.peer_manager = PeerManager(self.tracker, self.set_updated)
         
         Logger.info(f"Total torrent length: {self.tracker.torrent_obj.total_length}")
@@ -105,8 +105,7 @@ class Bittorrent:
             try:
                 self._download_loop()
             except Exception as e:
-                while True:
-                    print(e)
+                log_error(f"self._download_loop(): {e}")
             self._notify_trackers_complete()
         finally:
             self._finalize()
@@ -183,12 +182,7 @@ class Bittorrent:
         Logger.info("Torrent Complete")
         Logger.info(f"Total length: {self.tracker.torrent_obj.total_length}")
         self.peer_manager.torrent_completed = True
-        for url in self.tracker.torrent_obj.announce_list:
-            if "http" in url:
-                threading.Thread(target=self.tracker.http_request, args=(url, 'completed')).start()
-            elif "udp" in url:
-                threading.Thread(target=self.tracker.udp_request, args=(url, 'completed')).start()
-
+        self.tracker.notify_trackers_complete()
         self.peer_manager.piece_manager.print_progress_bar_safe(
             f"Completed {self.peer_manager.piece_manager.num_of_downloaded_pieces()}/{self.peer_manager.piece_manager.num_of_requested_pieces()}/{self.peer_manager.piece_manager.num_of_empty_pieces()}/{self.peer_manager.piece_manager.number_of_pieces}"
         )
@@ -231,8 +225,10 @@ if __name__ == "__main__":
     # torrent = os.path.join('torrents', 'The_Jackbox_Party_Pack_3_MANY_PEERS_680MB.torrent')
     # torrent = os.path.join('torrents', 'REPO_300.torrent')
     # torrent = os.path.join('torrents', 'music.torrent')
+    # torrent = os.path.join('torrents', '245_rut.torrent')
     # torrent = os.path.join('torrents', 'Photoshop_4gb.torrent')
-    torrent = os.path.join('torrents', '1PieceManyManyFiles.torrent')
+    torrent = os.path.join('torrents', 'Photoshop_2.58gb_rutr.torrent')
+    # torrent = os.path.join('torrents', '1PieceManyManyFiles.torrent')
     path = os.path.join('.', 'down')
     b = Bittorrent()
     b.start_downloading(torrent, path)

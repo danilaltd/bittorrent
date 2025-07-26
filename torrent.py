@@ -64,7 +64,7 @@ class Torrent:
         self.info_hash = hashlib.sha1(bencoded_info).digest()
         self.peer_id = self.generate_peer_id()
         self.left = self.total_length
-        self.port = 6889
+        self.port = 6881
 
     def generate_peer_id(self):
         seed = str(time.time())

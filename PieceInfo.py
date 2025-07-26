@@ -465,8 +465,6 @@ class PieceInfo:
                     'path': path
                 }
                 files_by_piece.setdefault(piece_index, []).append(block)
-                if piece_index == 623:
-                    print(block)
 
                 # advance counters
                 remaining -= chunk

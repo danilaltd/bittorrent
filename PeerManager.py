@@ -2,7 +2,7 @@ from math import pi
 from BlockandPiece import BLOCK_SIZE, Status
 from peer import Peer
 from Messages import Handshake
-from tracker import Tracker
+from TrackersManager import TrackersManager
 from peer import Peer, MAX_CONNECTION_ATTEMPTS
 import threading
 import socket
@@ -81,8 +81,8 @@ def log_info(msg, flags = None, name = ''):
         f.write(res)
 
 class PeerManager:
-    def __init__(self, tracker_obj: Tracker, notify):
-        self._tracker_obj: Tracker = tracker_obj
+    def __init__(self, tracker_obj: TrackersManager, notify):
+        self._tracker_obj: TrackersManager = tracker_obj
         self._peers: list[Peer] = []
         self._peers_lock = RWLock("_peers_lock")
         self._peers_ip_port: list[tuple[str, str]] = []
@@ -455,6 +455,7 @@ class PeerManager:
                                         peer.connecting = False
                                 except Exception as e:
                                     log_error(f"Handshake error for {peer.ip_port}", e)
+                                    ip_port = self._unregister_peer(peer.sock)
                                     peer.bad_peer = True
                             else:
                                 message_ID = msg[4:5]

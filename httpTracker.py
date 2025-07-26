@@ -1,0 +1,85 @@
+import struct
+import socket
+import time
+from enum import Enum
+from bcoding import bdecode
+import requests
+
+class HTTPEvent(Enum):
+    started = 'started'
+    completed = 'completed'
+    stopped = 'stopped'
+
+class httpTracker:
+    def __init__(self, url, info_hash: bytes, peer_id: bytes, port: int):
+        self.url = url
+        self.info_hash = info_hash
+        self.peer_id = peer_id
+        self.port = port
+        self.announce_interval: int = 1
+        self._notified_start = False
+        self.attempts = 0
+        self.announce_fault = False
+        self.last_transmition = time.time()
+        
+    def announce(self, downloaded: int, left: int, uploaded: int, port: int, event: HTTPEvent | None = None) -> list[tuple[str, int]]:
+        self.last_transmition = time.time()
+        if self.announce_fault:
+            self.attempts += 1
+        self.announce_fault = True
+        self.announce_interval = 15
+        payload = {
+            'info_hash': self.info_hash, 
+            'peer_id': self.peer_id, 
+            'port': self.port, 
+            'uploaded': uploaded, 
+            'downloaded': downloaded, 
+            'left': left, 
+            'numwant': 200, 
+        }
+        
+        if event is not None:
+            payload['event'] = event.value
+        elif not self._notified_start:
+            payload['event'] = HTTPEvent.started.value
+            self._notified_start = True
+
+        try:
+            try:
+                answer_tracker = requests.get(self.url, params=payload, timeout=5)
+            except Exception as e:
+                raise Exception(f"requests error. url: {self.url}, err: {e}")
+            try:
+                response = bdecode(answer_tracker.content)
+            except Exception as e:
+                raise Exception(f"bdecode error: {e}; contrnt: {answer_tracker.content}; status_code: {answer_tracker.status_code}")
+            res: list[tuple[str, int]] = set()
+            if 'interval' in response and 'peers' in response:
+                announce_interval = response['interval']
+                peers = response['peers']
+            else:
+                raise Exception(f" 'interval' in response and 'peers' in response == False. response: {response}")
+            
+            if type(peers) != dict:
+                if len(peers) % 6 != 0:
+                    raise Exception(f"len(peers) % 6 != 0. len: {len(peers)}; type:{type(peers)}; content: {peers}")
+                    
+                offset=0
+                for _ in range(len(peers)//6):
+                    ip = socket.inet_ntoa(peers[offset:offset + 4])
+                    offset += 4
+                    port = struct.unpack("!H", peers[offset : offset + 2])[0]
+                    offset += 2
+                    ip_port = (ip,port)
+                    res.add(ip_port)
+            else:
+                for p in peers:
+                    ip_port = (p['ip'], p['port'])
+                    res.add(ip_port)
+                    
+            self.attempts = 0
+            self.announce_fault = False
+            self.announce_interval = announce_interval
+            return res
+        except Exception as e:
+            raise Exception(f"http_request: {e}")
