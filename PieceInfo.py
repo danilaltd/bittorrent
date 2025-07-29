@@ -1,19 +1,18 @@
 from torrent import Torrent
 from math import ceil
 from BlockandPiece import Piece, BLOCK_SIZE, Status
-import random
 import colorama
-from colorama import Fore, Back, Style
 import time
 import os
 import datetime
 from datetime import datetime
-from logger import timed_lock, lock_decorator, print_lock_stats, Logger
+from logger import print_lock_stats
 from peer import Peer
 from rwlock import RWLock
 import threading
 import traceback
 import queue
+import cProfile
 from pathlib import Path
 from typing import Iterator
 
@@ -72,7 +71,9 @@ class PieceInfo:
     def __init__(self, torrent):
         self._torrent: Torrent = torrent
         self._torrent_lock = RWLock("_torrent_lock")
-        self.number_of_pieces = ceil(torrent.total_length / torrent.piece_length)
+        self._total_length = torrent.total_length
+        self._piece_length = torrent.piece_length
+        self.number_of_pieces = ceil(self._total_length / self._piece_length)
         self._pieces: list[Piece] = []
         
         self._status_counts = [self.number_of_pieces, 0, 0]
@@ -93,50 +94,22 @@ class PieceInfo:
         self._download_speed = 0
         self._speed_history = []
         
-
-    @property
-    def torrent(self):
-        with self._torrent_lock.read_access:
-            return self._torrent
-    @torrent.setter
-    def torrent(self, value):
-        with self._torrent_lock.write_access:
-            self._torrent = value
-
-    @property
-    def downloaded_count(self):
-        with self._downloaded_count_lock.read_access:
-            return self._downloaded_count
-    @downloaded_count.setter
-    def downloaded_count(self, value):
-        with self._downloaded_count_lock.write_access:
-            self._downloaded_count = value
-            
-    @property
-    def requested_count(self):
-        with self._requested_count_lock.read_access:
-            return self._requested_count
-    @requested_count.setter
-    def requested_count(self, value):
-        with self._requested_count_lock.write_access:
-            self._requested_count = value
-            
-    @property
-    def empty_count(self):
-        with self._empty_count_lock.read_access:
-            return self._empty_count
-    @empty_count.setter
-    def empty_count(self, value):
-        with self._empty_count_lock.write_access:
-            self._empty_count = value
+        self.running = True
+        self._monitor_timeouts_thread = threading.Thread(target=self.monitor_block_timeouts_safe_enter)
+        # self._monitor_timeouts_thread.daemon = True
+        self._monitor_timeouts_thread.start()
+        
+        # self.file_thread = threading.Thread(target=self.write_into_file_safe)
+        # self.file_thread.start()
+        
 
     def _generate_pieces(self):
         last_piece = self.number_of_pieces - 1
         for i in range(self.number_of_pieces):
             if i == last_piece:
-                piece_length = self.torrent.total_length - (self.number_of_pieces - 1) * self.torrent.piece_length
+                piece_length = self._total_length - (self.number_of_pieces - 1) * self._piece_length
             else:
-                piece_length = self.torrent.piece_length
+                piece_length = self._piece_length
             piece = Piece(i, piece_length, self._pieces_SHA1[i], self._ready_queue)
             self._totalBlocks += piece.number_of_blocks
             self._pieces.append(piece)
@@ -145,20 +118,21 @@ class PieceInfo:
         for i in range(self.number_of_pieces):
             start = i * 20
             end = start + 20
-            self._pieces_SHA1.append(self.torrent.pieces[start : end])
+            self._pieces_SHA1.append(self._torrent.pieces[start : end])
 
-    def _merge_blocks(self, blocks):
-        res = b""
-        for block in blocks:
-            res += block
-        return res
+    def monitor_block_timeouts_safe_enter(self):
+        profiler = cProfile.Profile()
+        profiler.enable()
+        self.monitor_block_timeouts_safe()
+        profiler.disable()
+        profiler.dump_stats('profile/monitor_block_timeouts_safe.out')
         
-    def _print_progress_bar_internal(self, suffix, decimals, print_matrix, peers):
+    def _print_progress_bar_internal(self, decimals, print_matrix, peers):
         """Internal method for printing progress bar without locks"""
         # Calculate download speed
         out = ""
         out += f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n'
-        out += self._progress_bar_string_internal(decimals, suffix, peers) 
+        out += self._progress_bar_string_internal(decimals, peers) 
         
         if peers is not None:
             out += self._peer_stats_string_internal(peers)   
@@ -174,7 +148,7 @@ class PieceInfo:
         except Exception as e:
             log_error(f'error in status: {e}')
 
-    def _progress_bar_string_internal(self, decimals, suffix, peers):
+    def _progress_bar_string_internal(self, decimals, peers):
         """Internal method for progress bar string without locks"""
         total = self._totalBlocks
         current_time = time.time()
@@ -224,6 +198,8 @@ class PieceInfo:
             percent1 = "0.0"
             percent2 = "0.0"
         
+        suffix = f"{self.num_of_downloaded_pieces()}/{self.num_of_requested_pieces()}/{self.num_of_empty_pieces()}/{self.number_of_pieces}"
+        
         return f'{percent1} {percent2}% {suffix} {speed_str} ETA: {eta_str}\n'
 
     def _matrix_string_internal(self, matrix_data):
@@ -267,7 +243,7 @@ class PieceInfo:
                 if not border and not peer.connected:
                     table += "Not conected:\n"
                     border = True
-                peer_id = peer.ip
+                peer_id = f"{peer.ip}:{peer.port}"
                 # available = peer.avaliable_pieces(needed_pieces)
                 
                 if peer.connected:
@@ -313,15 +289,12 @@ class PieceInfo:
                 strings = []    
                 # sign = '+' if active else '-'
                 # strings.append(f"{sign:<2}")
-                strings.append(f"{peer_id:<15}")
+                strings.append(f"{peer_id:<25}")
                 # strings.append(f"Pieces: {available:<4}")
                 strings.append(f"Blocks: {peer.blocks_recieved:<6}")
                 strings.append(f"Connections: {peer.requests_sent:<7}")
                 strings.append(f"Pending: {peer.pending_requests:<7}")
                 strings.append(f"Canceled: {peer.canceled_requests:<7}")
-                # strings.append(f"Pending: {peer.requests_sent - peer.blocks_recieved:<7}")
-                # if abs(peer.pending_requests - (peer.requests_sent - peer.blocks_recieved)) > 0:
-                    # print(f"{peer.pending_requests} {peer.requests_sent - peer.blocks_recieved}")
                 strings.append(f"Bad: {'+' if peer.bad_peer else '-':<3}")
                 strings.append(f"Unchocked: {'+' if not peer.peer_choking else '-':<3}")
                 strings.append(f"Speed: {speed_str:<7}")
@@ -347,24 +320,26 @@ class PieceInfo:
                 matrix.append(' ')  # Not downloaded
         return matrix
 
-    def monitor_block_timeouts_safe(self, timeout):
-        for piece_index, piece in enumerate(self._pieces):
-            bad_blocks = piece.get_blocks_to_reset(timeout)
-            if bad_blocks:
-                cur_time = time.time()
-                print(f"reset: {piece_index}:{bad_blocks}")
-                for i in bad_blocks:
-                    self.update_block_status_safe(piece_index, i, Status.EMPTY, last_requested=cur_time)
-            
-
+    def monitor_block_timeouts_safe(self, check_interval=5, timeout=25):
+        while self.running:
+            for piece_index, piece in enumerate(self._pieces):
+                self.set_blocks_empty(piece_index, piece.get_blocks_to_reset(timeout))
+            time.sleep(check_interval)
+    def set_blocks_empty(self, piece_index, bad_blocks, skip_notify: bool = False):    
+        if bad_blocks:
+            cur_time = time.time()
+            print(f"reset: {piece_index}:{bad_blocks}")
+            for i in bad_blocks:
+                self.update_block_status_safe(piece_index, i, Status.EMPTY, last_requested=cur_time, skip_notify=skip_notify)
+                
     def is_need_to_download(self, piece_index: int):
         return self.is_piece_empty(piece_index)
     
     def _get_piece_size(self, piece_index: int):
         if piece_index == self.number_of_pieces - 1:
-            res = self.torrent.total_length - (self.number_of_pieces - 1) * self.torrent.piece_length
+            res = self._total_length - piece_index * self._piece_length
         else:
-            res = self.torrent.piece_length
+            res = self._piece_length
         return res
     
     def get_block_size(self, piece_index, block_index):
@@ -412,18 +387,18 @@ class PieceInfo:
     def all_piece_complete_safe(self):
         return self.num_of_downloaded_pieces() == self.number_of_pieces
 
-    def print_progress_bar_safe(self, suffix='Complete', decimals=1, print_matrix=False, peers=None):
+    def print_progress_bar_safe(self, decimals=1, print_matrix=False, peers=None):
         try:
-            self._print_progress_bar_internal(suffix, decimals, print_matrix, peers)
+            self._print_progress_bar_internal(decimals, print_matrix, peers)
         except Exception as e:
             log_error(f"print_progress_bar_safe: {e}" )
 
-    def update_block_status_safe(self, piece_index: int, block_index, state: Status, data=None, last_requested=None, requested_by: Peer = None):
+    def update_block_status_safe(self, piece_index: int, block_index, state: Status, data=None, last_requested=None, requested_by: Peer = None, skip_notify: bool = False):
         try:
             if state == Status.DOWNLOADED:
                 self.downloaded_blocks += 1
 
-            prev, cur = self._pieces[piece_index].set_block_state(block_index, state, data, last_requested, requested_by)
+            prev, cur = self._pieces[piece_index].set_block_state(block_index, state, data, last_requested, requested_by, skip_notify)
             self._fix_nums(prev, cur, piece_index)
             return True
         except Exception as e:
@@ -443,9 +418,9 @@ class PieceInfo:
     def _load_files(self):
         files_by_piece = {}
         piece_offset = 0
-        piece_length = self.torrent.piece_length
+        piece_length = self._piece_length
 
-        for file_info in self.torrent.files:
+        for file_info in self._torrent.files:
             remaining = file_info['length']
             file_offset = 0
             path = file_info['path']
@@ -476,7 +451,7 @@ class PieceInfo:
     
     def write_into_file_safe(self):
         
-        base = Path(self.torrent.total_path)
+        base = Path(self._torrent.total_path)
         open_files = {}  # Path -> file object
 
         # Подготовить директории
@@ -513,7 +488,7 @@ class PieceInfo:
                 fd.flush()
                 i += 1
 
-            print(i)
+            # print(i)
             
         for fd in open_files.values():
             fd.flush()

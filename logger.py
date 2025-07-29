@@ -6,19 +6,6 @@ import functools
 from contextlib import contextmanager
 from datetime import datetime
 
-# def log_info(msg, flags = None):
-#     if flags is None:
-#         flags = []
-#     flags.insert(0, f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-#     log_entry = f'{msg}\n'
-#     res = ''
-#     for flag in flags:
-#         res += f"[{flag}]"
-#     res += ' '    
-#     res += log_entry    
-#     with open(os.path.join('logs', "locks.log"), 'a', encoding='utf-8') as f:
-#         f.write(res)
-
 def log_info(msg, flags = None, name = ''):
     if flags is None:
         flags = []

@@ -1,5 +1,4 @@
 import threading
-from logger import timed_lock
 
 class RWLock:
     """ Non-reentrant write-preferring rwlock. """

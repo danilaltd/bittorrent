@@ -1,5 +1,4 @@
 from bcoding import bencode, bdecode
-import sys
 import os
 import hashlib
 import time

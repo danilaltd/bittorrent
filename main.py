@@ -1,15 +1,13 @@
-from Messages import keep_alive
 from peer import Peer
 from TrackersManager import TrackersManager
 from PeerManager import PeerManager
-from BlockandPiece import BLOCK_SIZE, Status
+from BlockandPiece import BLOCK_SIZE
 import threading
 import time
 from datetime import datetime
-import sys
 import os
-import random
-from logger import Logger, timed_lock, print_lock_stats
+import cProfile
+from logger import Logger, print_lock_stats
 
 NEG_INF = float('-inf')
 
@@ -112,19 +110,10 @@ class Bittorrent:
 
     def _initialize(self):
         self.tracker.start_periodic_updates()
-        self.file_thread = threading.Thread(target=self.peer_manager.piece_manager.write_into_file_safe)
-        self.file_thread.start()
 
     def _download_loop(self):
         # Start monitor thread
-        self._monitor_thread = threading.Thread(target=self.monitor_block_timeouts)
-        self._monitor_thread.daemon = True
-        self._monitor_thread.start()
-        
         # Start progress thread
-        self._progress_thread = threading.Thread(target=self.progress_printer)
-        self._progress_thread.daemon = True
-        self._progress_thread.start()
         
         # while not self.peer_manager.piece_manager.all_piece_complete_safe():
         while True:
@@ -183,36 +172,20 @@ class Bittorrent:
         Logger.info(f"Total length: {self.tracker.torrent_obj.total_length}")
         self.peer_manager.torrent_completed = True
         self.tracker.notify_trackers_complete()
-        self.peer_manager.piece_manager.print_progress_bar_safe(
-            f"Completed {self.peer_manager.piece_manager.num_of_downloaded_pieces()}/{self.peer_manager.piece_manager.num_of_requested_pieces()}/{self.peer_manager.piece_manager.num_of_empty_pieces()}/{self.peer_manager.piece_manager.number_of_pieces}"
-        )
+        # self.peer_manager.piece_manager.print_progress_bar_safe(
+        #     f"Completed {self.peer_manager.piece_manager.num_of_downloaded_pieces()}/{self.peer_manager.piece_manager.num_of_requested_pieces()}/{self.peer_manager.piece_manager.num_of_empty_pieces()}/{self.peer_manager.piece_manager.number_of_pieces}"
+        # )
 
     def _finalize(self):
         self.running = False
         self.tracker.stop_periodic_updates()
         self.peer_manager.exitPeerThreads()
-        self.file_thread.join()
-        
-    def monitor_block_timeouts(self, check_interval=5, timeout=25):
-        while self.running:
-            self.peer_manager.piece_manager.monitor_block_timeouts_safe(timeout)
-            time.sleep(check_interval)
-
-    def progress_printer(self):
-        # not self.peer_manager.piece_manager.all_piece_complete_safe() and
-        while self.running:
-            self.peer_manager.piece_manager.print_progress_bar_safe(
-                f"{self.peer_manager.piece_manager.num_of_downloaded_pieces()}/{self.peer_manager.piece_manager.num_of_requested_pieces()}/{self.peer_manager.piece_manager.num_of_empty_pieces()}/{self.peer_manager.piece_manager.number_of_pieces}",
-                print_matrix=True,
-                peers=self.peer_manager.get_peers_for_progress()
-            )
-            time.sleep(1)
             
     def print_lock_statistics(self):
         """Выводит статистику использования locks для всего приложения"""
         print_lock_stats()
 
-if __name__ == "__main__":
+def main():
     # if len(sys.argv) != 3:
         # print("Usage: python main.py <torrent_file> <download_path>")
         # sys.exit(1)
@@ -232,5 +205,12 @@ if __name__ == "__main__":
     path = os.path.join('.', 'down')
     b = Bittorrent()
     b.start_downloading(torrent, path)
-    
-    
+
+if __name__ == "__main__":
+    profiler = cProfile.Profile()
+    profiler.enable()
+    try:
+        main()
+    finally:
+        profiler.disable()
+        profiler.dump_stats('profile/main.out')
