@@ -69,12 +69,8 @@ class have:
     message_ID = 4
     def __init__(self, piece_index) -> None:
         self.piece_index = piece_index
-    @classmethod
-    def parse_response(self, response):
-        length, message_ID, piece_index = struct.unpack(">IBI", response[:9])
-        if length == self.length and message_ID == self.message_ID:
-            return have(piece_index)
-        return -1
+    def byteStringForBitfield(self):
+        return struct.pack(">IBI", self.length, self.message_ID, self.piece_index)
 
 class Bitfield:
     # bitfield: <len=0001+X><id=5><bitfield>

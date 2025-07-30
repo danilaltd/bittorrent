@@ -1,3 +1,4 @@
+from torrent import Torrent
 from BlockandPiece import BLOCK_SIZE, Status
 from TrackersManager import TrackersManager
 from peer import Peer, MAX_CONNECTION_ATTEMPTS
@@ -10,12 +11,12 @@ import random
 import struct
 import os
 from datetime import datetime
-from logger import print_lock_stats
 from rwlock import RWLock
 import traceback
 from itertools import groupby
 import selectors
 import queue
+from pathlib import Path
 
 
 MAX_CONNECTED_PEER = 50
@@ -26,7 +27,10 @@ DEFAULT_PIECE_UPDATE_INTERVAL = 3
 RECONNECT_INTERVAL = 10
 OPTIMISTIC_UNCHOKE_INTERVAL = 30
 KEEPALIVE_INTERVAL = 60
+DISABLE_FILE_WRITE = True
 
+def RoundUp(x):
+    return ((x + 7) & (-8))
 
 def log_error(msg, exc=None, flags = None, name = ''):
     if flags is None:
@@ -86,7 +90,13 @@ class PeerManager:
         self._peers_ip_port_lock = RWLock("_peers_ip_port_lock")
         self._connected_peers: list[Peer] = []
         self._connected_peers_lock = RWLock("_connected_peers_lock")
-        self.piece_manager = PieceInfo(tracker_obj.torrent_obj)
+        self._torrent: Torrent = tracker_obj.torrent_obj
+        self._ready_queue: queue.Queue[tuple[int, list[bytes]]] = queue.Queue()
+        self.piece_manager = PieceInfo(tracker_obj.torrent_obj, self._ready_queue)
+        self._my_bitfield = bitstring.BitArray(RoundUp(self.piece_manager.number_of_pieces))
+        self.bit_field_ready = False
+        self._bit_field_lock = RWLock("")
+        self._bit_field_len = len(self._my_bitfield)
         self.torrent_completed = False
         self._optimistic_unchoke_peer: Peer = None
         self._running = True
@@ -104,9 +114,12 @@ class PeerManager:
         self._handshake_completed: dict[socket.socket, bool] = {}
         self._sock_to_peer: dict[socket.socket, Peer] = {}
         
-        self._receive_queue: queue.Queue = queue.Queue()
-        self._peers_to_clear_queue: queue.Queue[Peer] = queue.Queue()
+        self._pieces_to_notify: queue.Queue[int] = queue.Queue()
         
+        self._receive_queue: queue.Queue[tuple[socket.socket, bytes]] = queue.Queue()
+        self._peers_to_clear_queue: queue.Queue[Peer] = queue.Queue()
+
+        self._files = self._load_files(self._torrent.piece_length)
         self._periodic_piece_peers_thread = threading.Thread(target=self._periodic_piece_peers_update_enter)
         self._periodic_piece_peers_thread.start()
         
@@ -115,6 +128,9 @@ class PeerManager:
         
         self._reader_thread = threading.Thread(target=self.read_continously_from_sock_enter)
         self._reader_thread.start()
+        
+        self.file_thread = threading.Thread(target=self.write_into_files)
+        self.file_thread.start()
 
     def _periodic_piece_peers_update_enter(self):
         self._periodic_piece_peers_update()
@@ -244,9 +260,18 @@ class PeerManager:
         self.notify()
       
     def monitor_peers_keepalives(self):
+        notify_data = b''
+        while True:
+            try:
+                piece_index = self._pieces_to_notify.get_nowait()
+            except queue.Empty:
+                break
+            notify_data += have(piece_index).byteStringForBitfield()
         connected_peers = self.get_connected_peers_copy()
         current_time = time.time()
         for peer in connected_peers:
+            if notify_data and peer.bit_field_sent:
+                self.send_data(peer, notify_data)
             if current_time - peer.last_request_time >= KEEPALIVE_INTERVAL:
                 self.send_data(peer, keep_alive().byteStringForKeepAlive())
                 
@@ -390,7 +415,6 @@ class PeerManager:
         # else:
             # print(f"{ip_port} empty")
             
-
     def _handle_read(self, sock: socket.socket):
         recv_buf = self._recv_bufs[sock]
         try:
@@ -428,19 +452,19 @@ class PeerManager:
         if offset > 0:
             del recv_buf[:offset]
 
-    def getMessage(self):
+    def getMessage(self) -> tuple[socket.socket, bytes] | None:
         try:
             data = self._receive_queue.get(timeout=1)   
             return data
         except: 
             return None
 
-    def _get_peer_by_sock(self, sock) -> Peer:
+    def _get_peer_by_sock(self, sock: socket.socket) -> Peer:
         return self._sock_to_peer[sock]
 
     def read_continously_from_sock(self):
         try:
-            while self._running:
+            while True:
                 data = self.getMessage()
                 if data:
                     sock, msg = data
@@ -474,9 +498,9 @@ class PeerManager:
                                         if not self._is_peer_connected(peer):    
                                             self._add_connected_peer(peer)
                                             
-                                        if self.piece_manager.bit_field_ready:
-                                            print(f"send bf to {peer.ip_port}")
-                                            self.send_data(peer, Bitfield(self.piece_manager.get_my_bit_field()).byteStringForBitfield())
+                                        peer.bit_field_sent = True
+                                        if self.bit_field_ready:
+                                            self.send_data(peer, Bitfield(self.get_my_bit_field()).byteStringForBitfield())
                                         self.send_data(peer, interested().byteStringForInterested())
                                         peer.am_interested = True
                                         log_info(f"Successfully connected to peer {peer.ip_port}")
@@ -581,8 +605,9 @@ class PeerManager:
                         except Exception as e:
                             log_error(f"Error reading from {peer.ip_port}", e, flags = ['Reading'], name=f'{peer.ip_port}.log')
                             break
-                else:
-                    log_info("Empty read queue")
+                elif not self._running:
+                    break
+                    # log_info("Empty read queue")
                         
         except Exception as e:
             log_error(f"Fatal error in read thread. \n{traceback.format_exc()}", e, flags = ['Reading'])
@@ -727,6 +752,100 @@ class PeerManager:
         with self._peers_lock.read_access:
             return self._peers.copy()
     
-    def print_lock_statistics(self):
-        """Выводит статистику использования locks для этого объекта"""
-        print_lock_stats()
+    def set_bit_in_bit_field(self, piece_index) -> bool:
+        if not self.is_bit_set_in_bit_field(piece_index) and self._bit_field_len > piece_index:
+            with self._bit_field_lock.write_access:
+                self._my_bitfield[piece_index] = 1
+            self.bit_field_ready = True
+            return True
+        return False
+    
+    def is_bit_set_in_bit_field(self, piece_index) -> bool:
+        if self._bit_field_len <= piece_index:
+            return False
+        with self._bit_field_lock.read_access:
+            return self._my_bitfield[piece_index]
+    
+    def get_my_bit_field(self) -> bytes:
+        with self._bit_field_lock.read_access:
+            return self._my_bitfield.copy()
+    
+    def _load_files(self, piece_length: int):
+        files_by_piece = {}
+        piece_offset = 0
+
+        for file_info in self._torrent.files:
+            remaining = file_info['length']
+            file_offset = 0
+            path = file_info['path']
+
+            while remaining > 0:
+                piece_index, offset_in_piece = divmod(piece_offset, piece_length)
+                # space left in current piece
+                space_left = piece_length - offset_in_piece
+                chunk = min(remaining, space_left)
+
+
+                block = {
+                    'length': chunk,
+                    'piece_index': piece_index,
+                    'file_offset': file_offset,
+                    'piece_offset': offset_in_piece,
+                    'path': path
+                }
+                files_by_piece.setdefault(piece_index, []).append(block)
+
+                # advance counters
+                remaining -= chunk
+                piece_offset += chunk
+                file_offset += chunk
+
+        return files_by_piece
+    
+    def write_into_files(self):
+        base = Path(self._torrent.total_path)
+        open_files = {}  # Path -> file object
+
+        # Подготовить директории
+        dirs = {
+            base.joinpath(*entry['path']).parent
+            for lst in self._files.values()
+            for entry in lst
+        }
+        for d in dirs:
+            d.mkdir(parents=True, exist_ok=True)
+
+        while True:
+            try:
+                idx, blocks = self._ready_queue.get(timeout=5)
+            except queue.Empty:
+                if not self._running: 
+                    break 
+                else: 
+                    continue
+            data = b"".join(blocks)
+            self.set_bit_in_bit_field(idx)
+            self._pieces_to_notify.put(idx)
+            if not DISABLE_FILE_WRITE:
+                for entry in self._files.get(idx, []):
+                    rel_path = entry['path']
+                    full_path = base.joinpath(*rel_path)
+                    fd = open_files.get(full_path)
+                    if fd is None:
+                        mode = 'r+b' if full_path.exists() else 'wb'
+                        fd = full_path.open(mode)
+                        open_files[full_path] = fd
+
+                    start = entry['piece_offset']
+                    end = start + entry['length']
+                    chunk = data[start:end]
+                    fd.seek(entry['file_offset'])
+                    fd.write(chunk)
+                    fd.flush()
+
+            # print(i)
+            
+        for fd in open_files.values():
+            fd.flush()
+            os.fsync(fd.fileno())
+            fd.close()

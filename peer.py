@@ -83,6 +83,7 @@ class Peer:
         self.ip_port: tuple[str, int] = ip_port
         self.ip = ip_port[0]
         self.port = ip_port[1]
+        self.bit_field_sent = False
         self.am_choking = True
         self.am_interested = False
         self.peer_choking = True
@@ -235,6 +236,7 @@ class Peer:
             self.connection_time = current_time
             self.handshake_sent = False
             self.handshake_received = False
+            self.bit_field_sent = False
             self.am_choking = True
             self.am_interested = False
             self.peer_choking = True
@@ -274,6 +276,7 @@ class Peer:
         self.handshake_sent = False
         self.handshake_received = False
         self.sock = None
+        self.bit_field_sent = False
         self.am_choking = True
         self.am_interested = False
         self.peer_choking = True

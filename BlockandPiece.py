@@ -16,10 +16,9 @@ class Status(Enum):
     DOWNLOADED = 2
 
 class Piece:
-    def __init__(self, piece_index: int, piece_size: int, piece_sha1, ready_queue: queue.Queue[tuple[int, list[bytes]]]):
+    def __init__(self, piece_index: int, piece_size: int, ready_queue: queue.Queue[tuple[int, list[bytes]]]):
         self._piece_index: int = piece_index
         self.piece_size: int = piece_size
-        self._piece_sha1 = piece_sha1
         self.number_of_blocks = ceil(self.piece_size / BLOCK_SIZE)
         
         self._blocks_empty = (1 << self.number_of_blocks) - 1

@@ -5,15 +5,12 @@ import time
 import os
 import datetime
 from datetime import datetime
-from logger import print_lock_stats
 from peer import Peer
 from rwlock import RWLock
 import threading
 import traceback
 import queue
-from pathlib import Path
 from typing import Iterator
-import bitstring
 
 DISABLE_FILE_WRITE = True
 
@@ -70,9 +67,7 @@ def log_info(msg, flags = None, name = ''):
         f.write(res)
 
 class PieceInfo:
-    def __init__(self, torrent):
-        self._torrent: Torrent = torrent
-        self._torrent_lock = RWLock("_torrent_lock")
+    def __init__(self, torrent, ready_queue):
         self._total_length = torrent.total_length
         self._piece_length = torrent.piece_length
         self.number_of_pieces = ceil(self._total_length / self._piece_length)
@@ -84,30 +79,18 @@ class PieceInfo:
         self._pieces_statuses = [Status.EMPTY] * self.number_of_pieces
         
         self.downloaded_blocks= 0
-        self._pieces_SHA1 = []
         self._totalBlocks = 0
-        self._ready_queue: queue.Queue[tuple[int, list[bytes]]] = queue.Queue()
-        self._getSHA1()
+        self._ready_queue: queue.Queue[tuple[int, list[bytes]]] = ready_queue
         self._generate_pieces()
-        self._files = self._load_files()
         self._last_update_time = time.time()
         self._last_blocks_done = 0
         self._last_bytes_done = 0
         self._download_speed = 0
         self._speed_history = []
         
-        self._my_bitfield = bitstring.BitArray(RoundUp(self.number_of_pieces))
-        self.bit_field_ready = False
-        self._bit_field_lock = RWLock("")
-        self._bit_field_len = len(self._my_bitfield)
-        
         self.running = True
         self._monitor_timeouts_thread = threading.Thread(target=self.monitor_block_timeouts_safe_enter)
         self._monitor_timeouts_thread.start()
-        
-        self.file_thread = threading.Thread(target=self.write_into_files_enter)
-        self.file_thread.start()
-        
 
     def _generate_pieces(self):
         last_piece = self.number_of_pieces - 1
@@ -116,7 +99,7 @@ class PieceInfo:
                 piece_length = self._total_length - (self.number_of_pieces - 1) * self._piece_length
             else:
                 piece_length = self._piece_length
-            piece = Piece(i, piece_length, self._pieces_SHA1[i], self._ready_queue)
+            piece = Piece(i, piece_length, self._ready_queue)
             self._totalBlocks += piece.number_of_blocks
             self._pieces.append(piece)
     
@@ -418,110 +401,3 @@ class PieceInfo:
             self._status_counts[prev.value] -= 1
             self._status_counts[cur.value] += 1
             self._pieces_statuses[piece_index] = cur
-    
-    
-    def _load_files(self):
-        files_by_piece = {}
-        piece_offset = 0
-        piece_length = self._piece_length
-
-        for file_info in self._torrent.files:
-            remaining = file_info['length']
-            file_offset = 0
-            path = file_info['path']
-
-            while remaining > 0:
-                piece_index, offset_in_piece = divmod(piece_offset, piece_length)
-                # space left in current piece
-                space_left = piece_length - offset_in_piece
-                chunk = min(remaining, space_left)
-
-
-                block = {
-                    'length': chunk,
-                    'piece_index': piece_index,
-                    'file_offset': file_offset,
-                    'piece_offset': offset_in_piece,
-                    'path': path
-                }
-                files_by_piece.setdefault(piece_index, []).append(block)
-
-                # advance counters
-                remaining -= chunk
-                piece_offset += chunk
-                file_offset += chunk
-
-        return files_by_piece
-    
-    
-    def is_bit_set_in_bit_field(self, piece_index) -> bool:
-        if self._bit_field_len <= piece_index:
-            return False
-        with self._bit_field_lock.read_access:
-            return self._my_bitfield[piece_index]
-    
-    def set_bit_in_bit_field(self, piece_index) -> bool:
-        if not self.is_bit_set_in_bit_field(piece_index) and self._bit_field_len > piece_index:
-            with self._bit_field_lock.write_access:
-                self._my_bitfield[piece_index] = 1
-            self.bit_field_ready = True
-            return True
-        return False
-    
-    def get_my_bit_field(self) -> bytes:
-        with self._bit_field_lock.read_access:
-            return self._my_bitfield.copy()
-    
-    def write_into_files(self):
-        
-        base = Path(self._torrent.total_path)
-        open_files = {}  # Path -> file object
-
-        # Подготовить директории
-        dirs = {
-            base.joinpath(*entry['path']).parent
-            for lst in self._files.values()
-            for entry in lst
-        }
-        for d in dirs:
-            d.mkdir(parents=True, exist_ok=True)
-
-        while True:
-            try:
-                idx, blocks = self._ready_queue.get(timeout=5)
-            except queue.Empty:
-                if not self.running: 
-                    break 
-                else: 
-                    continue
-            data = b"".join(blocks)
-            self.set_bit_in_bit_field(idx)
-            if not DISABLE_FILE_WRITE:
-                for entry in self._files.get(idx, []):
-                    rel_path = entry['path']
-                    full_path = base.joinpath(*rel_path)
-                    fd = open_files.get(full_path)
-                    if fd is None:
-                        mode = 'r+b' if full_path.exists() else 'wb'
-                        fd = full_path.open(mode)
-                        open_files[full_path] = fd
-
-                    start = entry['piece_offset']
-                    end = start + entry['length']
-                    chunk = data[start:end]
-                    fd.seek(entry['file_offset'])
-                    fd.write(chunk)
-                    fd.flush()
-
-            # print(i)
-            
-        for fd in open_files.values():
-            fd.flush()
-            os.fsync(fd.fileno())
-            fd.close()
-
-            
-    def print_lock_statistics(self):
-        """Выводит статистику использования locks для этого объекта"""
-        print_lock_stats()
-        
