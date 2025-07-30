@@ -12,7 +12,6 @@ MAX_CONNECTION_ATTEMPTS = 3
 MAX_PENDING_REQUESTS = 64
 CONNECTION_TIMEOUT = 10
 INACTIVITY_TIMEOUT = 180
-KEEPALIVE_INTERVAL = 60
 
 def RoundUp(x):
     return ((x + 7) & (-8))
@@ -75,7 +74,7 @@ def log_info(msg, flags = None, name = ''):
         f.write(res)
 
 class Peer:
-    def __init__(self, ip_port: tuple[str, int], number_of_pieces):
+    def __init__(self, ip_port: tuple[str, int], number_of_pieces, send_cancel):
         self.sock: socket.socket = None
         self._bit_field = bitstring.BitArray(RoundUp(number_of_pieces))
         self._bit_field_len = 0
@@ -96,8 +95,6 @@ class Peer:
         self.connected = False
         self.handshake_sent = False
         self.handshake_received = False
-        self._last_keepalive = time.time()
-        self._last_keepalive_lock = RWLock("_last_keepalive_lock")
         self._last_activity = time.time()
         self._last_activity_lock = RWLock("_last_activity_lock")
         self._requests_sent = 0
@@ -117,6 +114,8 @@ class Peer:
         self.requested_blocks_per_piece: list[set[int]] = [set() for _ in range(number_of_pieces)]
         self.requested_blocks_per_piece_lock = threading.Lock()
         
+        self.send_cancel = send_cancel
+        
     @property
     def uploaded(self):
         with self._uploaded_lock.read_access:
@@ -125,17 +124,6 @@ class Peer:
     def uploaded(self, value):
         with self._uploaded_lock.write_access:
             self._uploaded = value
-
-    @property
-    def last_keepalive(self):
-        with self._last_keepalive_lock.read_access:
-            return self._last_keepalive
-    @last_keepalive.setter
-    def last_keepalive(self, value):
-        mem = self.last_activity
-        if mem is None or value is None or value - mem >= 1:
-            with self._last_keepalive_lock.write_access:
-                self._last_keepalive = value
 
     @property
     def last_activity(self):
@@ -241,7 +229,6 @@ class Peer:
             current_time = time.time()
             self.sock = sock
             self.ip_port = ip_port
-            self.last_keepalive = current_time
             self.update_activity(current_time)
             self.connection_attempts = 0
             self.connected = True
@@ -300,33 +287,6 @@ class Peer:
                 sock.close()
             except:
                 pass
-        
-    # def send_keepalive(self):
-    #     """Send keepalive message if needed"""
-    #     if not self.connected or not self.sock:
-    #         return False
-            
-    #     current_time = time.time()
-    #     if current_time - self.last_keepalive >= KEEPALIVE_INTERVAL:
-    #         try:
-    #             # self._send_data(b'\x00\x00\x00\x00')  # Keepalive message
-    #             self.last_keepalive = current_time
-    #             return True
-    #         except Exception as e:
-    #             log_info(f"Keepalive send failed for {self.ip_port}: {e}")
-    #             self.connected = False
-    #             return False
-    #     return True
-
-    # def check_inactivity(self):
-    #     """Check if peer has been inactive for too long"""
-    #     if not self.connected:
-    #         return True
-    #     current_time = time.time()
-    #     if current_time - self.last_activity >= self.INACTIVITY_TIMEOUT:
-    #         self.connected = False
-    #         return True
-    #     return False
 
     def update_activity(self, current_time = None):
         if current_time is None:
@@ -351,6 +311,7 @@ class Peer:
         if not skip_notify:
             with self.requested_blocks_per_piece_lock:
                 self.requested_blocks_per_piece[piece_index].discard(block_index)
+        self.send_cancel(self, piece_index, block_index)
         self._dec_pending_requests()
         self.canceled_requests += 1
     
@@ -360,16 +321,12 @@ class Peer:
         self._dec_pending_requests()
         self.blocks_recieved += 1
 
-    def request_block(self, piece_index: int, block_index: int, current_time: float):
+    def request_block(self, piece_index: int, block_index: int):
         with self.requested_blocks_per_piece_lock:
             self.requested_blocks_per_piece[piece_index].add(block_index)
         
         self._inc_pending_requests()
         self._inc_requests_sent()
-        
-        if not current_time:
-            current_time = time.time()
-        self.last_request_time = current_time
 
 
 

@@ -1,7 +1,6 @@
 from torrent import Torrent
 from math import ceil
 from BlockandPiece import Piece, BLOCK_SIZE, Status
-import colorama
 import time
 import os
 import datetime
@@ -12,11 +11,14 @@ from rwlock import RWLock
 import threading
 import traceback
 import queue
-import cProfile
 from pathlib import Path
 from typing import Iterator
+import bitstring
 
-colorama.init(autoreset=True)
+DISABLE_FILE_WRITE = True
+
+def RoundUp(x):
+    return ((x + 7) & (-8))
 
 def log_error(msg, exc=None, flags = None, name = ''):
     if flags is None:
@@ -94,13 +96,17 @@ class PieceInfo:
         self._download_speed = 0
         self._speed_history = []
         
+        self._my_bitfield = bitstring.BitArray(RoundUp(self.number_of_pieces))
+        self.bit_field_ready = False
+        self._bit_field_lock = RWLock("")
+        self._bit_field_len = len(self._my_bitfield)
+        
         self.running = True
         self._monitor_timeouts_thread = threading.Thread(target=self.monitor_block_timeouts_safe_enter)
-        # self._monitor_timeouts_thread.daemon = True
         self._monitor_timeouts_thread.start()
         
-        # self.file_thread = threading.Thread(target=self.write_into_file_safe)
-        # self.file_thread.start()
+        self.file_thread = threading.Thread(target=self.write_into_files_enter)
+        self.file_thread.start()
         
 
     def _generate_pieces(self):
@@ -121,11 +127,10 @@ class PieceInfo:
             self._pieces_SHA1.append(self._torrent.pieces[start : end])
 
     def monitor_block_timeouts_safe_enter(self):
-        profiler = cProfile.Profile()
-        profiler.enable()
         self.monitor_block_timeouts_safe()
-        profiler.disable()
-        profiler.dump_stats('profile/monitor_block_timeouts_safe.out')
+        
+    def write_into_files_enter(self):
+        self.write_into_files()
         
     def _print_progress_bar_internal(self, decimals, print_matrix, peers):
         """Internal method for printing progress bar without locks"""
@@ -449,7 +454,25 @@ class PieceInfo:
         return files_by_piece
     
     
-    def write_into_file_safe(self):
+    def is_bit_set_in_bit_field(self, piece_index) -> bool:
+        if self._bit_field_len <= piece_index:
+            return False
+        with self._bit_field_lock.read_access:
+            return self._my_bitfield[piece_index]
+    
+    def set_bit_in_bit_field(self, piece_index) -> bool:
+        if not self.is_bit_set_in_bit_field(piece_index) and self._bit_field_len > piece_index:
+            with self._bit_field_lock.write_access:
+                self._my_bitfield[piece_index] = 1
+            self.bit_field_ready = True
+            return True
+        return False
+    
+    def get_my_bit_field(self) -> bytes:
+        with self._bit_field_lock.read_access:
+            return self._my_bitfield.copy()
+    
+    def write_into_files(self):
         
         base = Path(self._torrent.total_path)
         open_files = {}  # Path -> file object
@@ -463,30 +486,32 @@ class PieceInfo:
         for d in dirs:
             d.mkdir(parents=True, exist_ok=True)
 
-        i = 0
-        mark_done = [False] * self.number_of_pieces
         while True:
-            idx, blocks = self._ready_queue.get()
-            if mark_done[idx]:
-                print(f"{idx} already wrote")
-            mark_done[idx] = True
+            try:
+                idx, blocks = self._ready_queue.get(timeout=5)
+            except queue.Empty:
+                if not self.running: 
+                    break 
+                else: 
+                    continue
             data = b"".join(blocks)
-            for entry in self._files.get(idx, []):
-                rel_path = entry['path']
-                full_path = base.joinpath(*rel_path)
-                fd = open_files.get(full_path)
-                if fd is None:
-                    mode = 'r+b' if full_path.exists() else 'wb'
-                    fd = full_path.open(mode)
-                    open_files[full_path] = fd
+            self.set_bit_in_bit_field(idx)
+            if not DISABLE_FILE_WRITE:
+                for entry in self._files.get(idx, []):
+                    rel_path = entry['path']
+                    full_path = base.joinpath(*rel_path)
+                    fd = open_files.get(full_path)
+                    if fd is None:
+                        mode = 'r+b' if full_path.exists() else 'wb'
+                        fd = full_path.open(mode)
+                        open_files[full_path] = fd
 
-                start = entry['piece_offset']
-                end = start + entry['length']
-                chunk = data[start:end]
-                fd.seek(entry['file_offset'])
-                fd.write(chunk)
-                fd.flush()
-                i += 1
+                    start = entry['piece_offset']
+                    end = start + entry['length']
+                    chunk = data[start:end]
+                    fd.seek(entry['file_offset'])
+                    fd.write(chunk)
+                    fd.flush()
 
             # print(i)
             

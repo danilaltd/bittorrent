@@ -128,7 +128,7 @@ class Piece:
                             requested_by.append(peer)
                     elif state == Status.REQUESTED:
                         if peer and peer not in requested_by:
-                            peer.request_block(self._piece_index, block_index, last_requested)
+                            peer.request_block(self._piece_index, block_index)
                             requested_by.append(peer)
                             
                 if state == Status.DOWNLOADED and self._cur_status == Status.DOWNLOADED:

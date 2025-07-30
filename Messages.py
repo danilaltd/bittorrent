@@ -1,5 +1,6 @@
 import struct
-from bitstring import *
+# from bitstring import *
+import bitstring
 class keep_alive:
     # keep-alive: <len=0000>
     length = 0
@@ -9,7 +10,7 @@ class keep_alive:
     def byteStringForKeepAlive(cls):
         return struct.pack('>I', cls.length)
     
-class chock:
+class chocke:
     # choke: <len=0001><id=0>
     length = 1
     message_ID = 0
@@ -18,7 +19,7 @@ class chock:
         pass
     @classmethod
     def to_bytes(self):
-        return pack(">IB", self.length, self.message_ID)
+        return struct.pack(">IB", self.length, self.message_ID)
     @classmethod
     def parse_response(self, response):
         length, message_ID = struct.unpack(">IB", response[:5])
@@ -77,24 +78,13 @@ class have:
 
 class Bitfield:
     # bitfield: <len=0001+X><id=5><bitfield>
-    length = None
     message_ID = 5
-
-    def __init__(self, bitfield):
+    def __init__(self, bitfield: bitstring.BitArray):
+        self.length = len(bitfield) // 8 + 1
         self.bitfield = bitfield
-        self.bitfield_as_bytes = bitfield.tobytes()
-        self.bitfield_length = len(self.bitfield_as_bytes)
-        self.length = 1 + self.bitfield_length
-    @classmethod
-    def parse_response(cls, response):
-        length, message_ID = struct.unpack(">IB", response[:5])
-        bitfield_length = length - 1
-        if message_ID == cls.message_ID:
-            raw_bytes, = struct.unpack(f">{bitfield_length}s", response[5 : 5 + bitfield_length])
-            bitfield = BitArray(bytes = bytes(raw_bytes))
-            return Bitfield(bitfield)
-        else:
-            return -1
+        
+    def byteStringForBitfield(self):
+        return struct.pack(">IB", self.length, self.message_ID) + self.bitfield.tobytes()
 
 class request:
     # request: <len=0013><id=6><index><begin><length>
@@ -121,6 +111,17 @@ class pieceMessage:
             return (piece_index, block_length, block_offset, block)      
         else:
             return -1
+        
+class cancel:
+    # cancel: <len=0013><id=8><index><begin><length>
+    length = 13
+    message_ID = 8
+    def __init__(self, piece_index, piece_offset, block_length):
+        self.piece_index = piece_index
+        self.piece_offset = piece_offset
+        self.block_length = block_length
+    def byteStringForCancel(self):
+        return struct.pack(">IBIII", self.length, self.message_ID, self.piece_index, self.piece_offset, self.block_length)
 
 class Handshake():
     def __init__(self, peer_id, info_hash):

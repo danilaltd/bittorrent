@@ -4,7 +4,6 @@ from httpTracker import httpTracker, HTTPEvent
 import struct
 import socket
 import time
-import cProfile
 from urllib.parse import urlparse
 import threading
 from datetime import datetime
@@ -163,8 +162,6 @@ class TrackersManager:
 
     def _periodic_update(self):
         """Periodically update trackers with current stats"""
-        profiler = cProfile.Profile()
-        profiler.enable()
         while self.running:
             try:
                 current_time = time.time()
@@ -208,8 +205,6 @@ class TrackersManager:
             except Exception as e:
                 log_error(f"Error in _periodic_update loop: {e} \nTraceback:\n{traceback.format_exc()}")
                 
-        profiler.disable()
-        profiler.dump_stats('profile/tracker.out')
 
     def _get_tracker_by_transaction_id(self, transaction_id: int) -> udpTracker:
         for tracker in self.udp_trackers:
@@ -249,9 +244,15 @@ class TrackersManager:
     def stop_periodic_updates(self):
         self.running = False
         for tracker in self.udp_trackers:
-            self.sock.sendto(tracker.bytes_for_announce(self.downloaded, self.left, self.uploaded, self.port, UDPEvent.stopped), tracker.sock_addr)
+            try:
+                self.sock.sendto(tracker.bytes_for_announce(self.downloaded, self.left, self.uploaded, self.port, UDPEvent.stopped), tracker.sock_addr)
+            except:
+                pass
         for tracker in self.http_trackers:
-            self._announcee_http(tracker, HTTPEvent.stopped)
+            try:
+                self._announcee_http(tracker, HTTPEvent.stopped)
+            except:
+                pass
             
     def notify_trackers_complete(self):
         for tracker in self.udp_trackers:

@@ -1,13 +1,10 @@
 from BlockandPiece import BLOCK_SIZE, Status
-from peer import Peer
-from Messages import Handshake
 from TrackersManager import TrackersManager
 from peer import Peer, MAX_CONNECTION_ATTEMPTS
 import threading
 import socket
 from Messages import *
 from PieceInfo import PieceInfo
-import socket
 import time
 import random
 import struct
@@ -19,7 +16,6 @@ import traceback
 from itertools import groupby
 import selectors
 import queue
-import cProfile
 
 
 MAX_CONNECTED_PEER = 50
@@ -29,6 +25,8 @@ MIN_PIECE_UPDATE_INTERVAL = 3
 DEFAULT_PIECE_UPDATE_INTERVAL = 3
 RECONNECT_INTERVAL = 10
 OPTIMISTIC_UNCHOKE_INTERVAL = 30
+KEEPALIVE_INTERVAL = 60
+
 
 def log_error(msg, exc=None, flags = None, name = ''):
     if flags is None:
@@ -119,25 +117,13 @@ class PeerManager:
         self._reader_thread.start()
 
     def _periodic_piece_peers_update_enter(self):
-        profiler = cProfile.Profile()
-        profiler.enable()
         self._periodic_piece_peers_update()
-        profiler.disable()
-        profiler.dump_stats('profile/_periodic_piece_peers_update.out')
         
     def _socket_worker_loop_enter(self):
-        profiler = cProfile.Profile()
-        profiler.enable()
         self._socket_worker_loop()
-        profiler.disable()
-        profiler.dump_stats('profile/_socket_worker_loop.out')
         
     def read_continously_from_sock_enter(self):
-        profiler = cProfile.Profile()
-        profiler.enable()
         self.read_continously_from_sock()
-        profiler.disable()
-        profiler.dump_stats('profile/read_continously_from_sock.out')
     
     def _is_peer_in_peers(self, peer: Peer):
         with self._peers_lock.read_access:
@@ -227,11 +213,12 @@ class PeerManager:
                     print_matrix=True,
                     peers=self._get_peers_for_progress()
                 )
-                
+
+                self.monitor_peers_keepalives()
                 
                 if not peer_to_clear:
                     try:
-                        peer_to_clear = self._peers_to_clear_queue.get_nowait()
+                        peer_to_clear, sock = self._peers_to_clear_queue.get_nowait()
                         peer_to_clear_getting_time = time.time()
                     except queue.Empty:
                         peer_to_clear = None
@@ -239,9 +226,15 @@ class PeerManager:
                     with peer_to_clear.requested_blocks_per_piece_lock:
                         for piece_index, blocks in enumerate(peer_to_clear.requested_blocks_per_piece):
                             self.piece_manager.set_blocks_empty(piece_index, blocks, True)
+                    # try:
+                    self._sock_to_peer.pop(sock)
+                    # except:
+                        # pass
+                    peer_to_clear = None
+                    
                 time.sleep(1)
             except Exception as e:
-                log_error("Error in rarest piece update thread", e)
+                log_error(f"Error in rarest piece update thread: {e} \n {traceback.format_exc()}")
                 time.sleep(5)
     
     def update_rarest_piece_min_heap(self):
@@ -249,6 +242,14 @@ class PeerManager:
         with self._rarest_piece_min_heap_lock:
             self._rarest_piece_min_heap = res
         self.notify()
+      
+    def monitor_peers_keepalives(self):
+        connected_peers = self.get_connected_peers_copy()
+        current_time = time.time()
+        for peer in connected_peers:
+            if current_time - peer.last_request_time >= KEEPALIVE_INTERVAL:
+                self.send_data(peer, keep_alive().byteStringForKeepAlive())
+                
         
     def request_piece_update(self):
         self.need_update_pieces = True
@@ -281,7 +282,7 @@ class PeerManager:
             for peer_ip_port in peers_copy:
                 if not self._is_peer_in_peers_ip_port(peer_ip_port):
                     self._add_peer_ip_port(peer_ip_port)
-                    peerObj = Peer(peer_ip_port, self.piece_manager.number_of_pieces)
+                    peerObj = Peer(peer_ip_port, self.piece_manager.number_of_pieces, self.send_cancel)
                     self._add_peer(peerObj)
                     self.launch_thread(peerObj)
         except Exception as e:
@@ -473,6 +474,9 @@ class PeerManager:
                                         if not self._is_peer_connected(peer):    
                                             self._add_connected_peer(peer)
                                             
+                                        if self.piece_manager.bit_field_ready:
+                                            print(f"send bf to {peer.ip_port}")
+                                            self.send_data(peer, Bitfield(self.piece_manager.get_my_bit_field()).byteStringForBitfield())
                                         self.send_data(peer, interested().byteStringForInterested())
                                         peer.am_interested = True
                                         log_info(f"Successfully connected to peer {peer.ip_port}")
@@ -602,29 +606,28 @@ class PeerManager:
         
     def _unregister_peer(self, sock: socket.socket):
         try:
-            peer = self._sock_to_peer.pop(sock)
+            peer = self._sock_to_peer[sock]
         except KeyError:
-            return
-        ip_port = peer.ip_port
+            pass
         self._send_bufs.pop(sock, None)
         self._recv_bufs.pop(sock, None)
         self._send_views.pop(sock, None)
         self._send_queues.pop(sock, None)
         self._handshake_completed.pop(sock, None)
         
-        if self._is_peer_connected(peer):
-            self._remove_connected_peer(peer)
+        
         try:
             self._selector.unregister(sock)
         except Exception:
             pass 
-        
-        try:
+        if peer:
+            if self._is_peer_connected(peer):
+                    self._remove_connected_peer(peer)
+            self._peers_to_clear_queue.put((peer, peer.sock))
             peer.close()
-        except Exception:
-            pass
-        
-        return ip_port
+            ip_port = peer.ip_port
+            return ip_port
+        return None
     
     def MultiThreadedConnection(self, peer:Peer):
         # if peer.ip != '5.79.98.162' and peer.ip != '90.240.225.228':
@@ -660,8 +663,9 @@ class PeerManager:
             log_error(f"Connection error for {peer.ip_port} \nTraceback:\n{traceback.format_exc()}", e)
 
     def send_data(self, peer: Peer, data):
-        self._send_queues[peer.sock].put(data)
-        # print(self._send_queues[ip_port].qsize())
+        if peer.connected:
+            peer.last_request_time = time.time()
+            self._send_queues[peer.sock].put(data)
         
 
     def prefetch_next_blocks(self, piece_index, peer: Peer):
@@ -708,11 +712,14 @@ class PeerManager:
             
             self._last_optimistic_unchoke = current_time
 
+    def send_cancel(self, peer: Peer, piece_index, block_index):
+        self.send_data(peer, cancel(piece_index, block_index * BLOCK_SIZE, self.piece_manager.get_block_size(piece_index, block_index)).byteStringForCancel())
+
     def get_rarest_piece_min_heap_copy(self):
         with self._rarest_piece_min_heap_lock:
             return self._rarest_piece_min_heap.copy()
 
-    def get_connected_peers_for_stats(self):
+    def get_connected_peers_copy(self):
         with self._connected_peers_lock.read_access:
             return self._connected_peers.copy()
 

@@ -6,7 +6,7 @@ import threading
 import time
 from datetime import datetime
 import os
-import cProfile
+import yappi
 from logger import Logger, print_lock_stats
 
 NEG_INF = float('-inf')
@@ -162,7 +162,7 @@ class Bittorrent:
     def _update_stats(self):
         try:
             downloaded = self.peer_manager.piece_manager.num_of_downloaded_pieces()
-            uploaded = sum(peer.uploaded for peer in self.peer_manager.get_connected_peers_for_stats())
+            uploaded = sum(peer.uploaded for peer in self.peer_manager.get_connected_peers_copy())
             self.tracker.update_stats(downloaded * BLOCK_SIZE, uploaded)
         except Exception as e:
             log_error(f"Error updating stats: {e}")
@@ -207,10 +207,14 @@ def main():
     b.start_downloading(torrent, path)
 
 if __name__ == "__main__":
-    profiler = cProfile.Profile()
-    profiler.enable()
+    yappi.set_clock_type("cpu")
+    yappi.start()
     try:
         main()
     finally:
-        profiler.disable()
-        profiler.dump_stats('profile/main.out')
+        yappi.stop()
+        yappi.get_func_stats().save("profile/profile.callgrind", type="CALLGRIND")
+        yappi.get_func_stats().save("profile/profile.pstat", type="pstat")
+
+
+        # yappi.get_func_stats().save("profile/yappi.prof", type="pstat")
