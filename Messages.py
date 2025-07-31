@@ -18,7 +18,7 @@ class chocke:
     def __init__(self) -> None:
         pass
     @classmethod
-    def to_bytes(self):
+    def byteStringForChoke(self):
         return struct.pack(">IB", self.length, self.message_ID)
     @classmethod
     def parse_response(self, response):
@@ -34,14 +34,6 @@ class unchoke:
 
     def __init__(self):
         return
-    @classmethod
-    def parse_response(self, response):
-        length, message_id = struct.unpack('>IB', response[:5])
-        if length == self.length and message_id == self.message_ID:
-            return 1
-        else:
-            return -1
-            
     def byteStringForUnchoke(self):
         return struct.pack('>IB', self.length, self.message_ID)
 
@@ -58,10 +50,10 @@ class not_interested:
     # not interested: <len=0001><id=3>
     length = 1
     message_ID = 3
-    def __init__(self) -> None:
+    def __init__(self):
         pass
     def byteStringForNotInterested(self):
-        return struct.pack(">IB", self.length, self.message_ID)
+        return struct.pack('>IB', self.length, self.message_ID)
     
 class have:
     # have: <len=0005><id=4><piece index>

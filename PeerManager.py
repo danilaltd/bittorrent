@@ -132,7 +132,7 @@ class PeerManager:
         
         self._reader_thread = threading.Thread(target=self.read_continously_from_sock_enter)
         self._reader_thread.start()
-        
+    
     def _periodic_piece_peers_update_enter(self):
         self._periodic_piece_peers_update()
         
@@ -282,6 +282,26 @@ class PeerManager:
         for peer in connected_peers:
             if notify_data and peer.bit_field_sent:
                 self.send_data(peer, notify_data)
+            peer_needs, peer_can_send = peer.get_abilities(self.get_my_bit_field())
+            if peer_needs:
+                if peer.peer_interested:
+                    if peer.am_choking:
+                        self.send_unchoke(peer)
+                else:
+                    if not peer.am_choking:
+                        self.send_choke(peer)
+            else:
+                if not peer.am_choking:
+                    self.send_choke(peer)
+                    
+            if peer_can_send:
+                if not peer.am_interested:
+                    self.send_interested(peer)
+            else:
+                if peer.am_interested:
+                    self.send_not_interested(peer)
+                    
+
             if current_time - peer.last_request_time >= KEEPALIVE_INTERVAL:
                 self.send_data(peer, keep_alive().byteStringForKeepAlive())
                 
@@ -513,11 +533,7 @@ class PeerManager:
                                         if not self._is_peer_connected(peer):    
                                             self._add_connected_peer(peer)
                                             
-                                        peer.bit_field_sent = True
-                                        if self.bit_field_ready:
-                                            self.send_data(peer, Bitfield(self.get_my_bit_field()).byteStringForBitfield())
-                                        self.send_data(peer, interested().byteStringForInterested())
-                                        peer.am_interested = True
+                                        self.send_bit_field(peer)
                                         log_info(f"Successfully connected to peer {peer.ip_port}")
                                         peer.connecting = False
                                 except Exception as e:
@@ -576,7 +592,7 @@ class PeerManager:
                                     else:
                                         log_error(f"bitfield: couldn't read bitfield_data", flags = ['Reading'], name=f'{peer.ip_port}.log')
                                 elif message_ID_u == 6:  # Request
-                                    # log_info(f"Received request from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                    log_info(f"Received request from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}.log')
                                     data = msg[5:17]
                                     if data:
                                         pass
@@ -734,18 +750,14 @@ class PeerManager:
                 # Unchoke the previous optimistic peer if it exists
                 if self._optimistic_unchoke_peer and self._is_peer_connected(self._optimistic_unchoke_peer):
                     try:
-                        unchoke_msg = unchoke()
-                        self.send_data(self._optimistic_unchoke_peer, unchoke_msg.byteStringForUnchoke())
-                        self._optimistic_unchoke_peer.am_choking = False
+                        self.send_unchoke(self._optimistic_unchoke_peer)
                     except Exception as e:
                         log_error(f"Error sending optimistic unchoke to {self._optimistic_unchoke_peer.ip_port}", e)
                 
                 # Select new optimistic peer
                 self._optimistic_unchoke_peer = random.choice(choked_peers)
                 try:
-                    unchoke_msg = unchoke()
-                    self.send_data(self._optimistic_unchoke_peer, unchoke_msg.byteStringForUnchoke())
-                    self._optimistic_unchoke_peer.am_choking = False
+                    self.send_unchoke(self._optimistic_unchoke_peer)
                     log_info(f"Optimistic unchoke for {self._optimistic_unchoke_peer.ip_port}")
                 except Exception as e:
                     log_error(f"Error sending optimistic unchoke to {self._optimistic_unchoke_peer.ip_port}", e)
@@ -755,6 +767,27 @@ class PeerManager:
     def send_cancel(self, peer: Peer, piece_index, block_index):
         self.send_data(peer, cancel(piece_index, block_index * BLOCK_SIZE, self.piece_manager.get_block_size(piece_index, block_index)).byteStringForCancel())
 
+    def send_choke(self, peer: Peer):
+        self.send_data(peer, chocke().byteStringForChoke())
+        peer.am_choking = True
+        
+    def send_unchoke(self, peer: Peer):
+        self.send_data(peer, unchoke().byteStringForUnchoke())
+        peer.am_choking = False
+        
+    def send_interested(self, peer: Peer):
+        self.send_data(peer, interested().byteStringForInterested())
+        peer.am_interested = True
+        
+    def send_not_interested(self, peer: Peer):
+        self.send_data(peer, not_interested().byteStringForNotInterested())
+        peer.am_interested = False
+        
+    def send_bit_field(self, peer: Peer):
+        peer.bit_field_sent = True
+        if self.bit_field_ready:
+            self.send_data(peer, Bitfield(self.get_my_bit_field()).byteStringForBitfield())
+    
     def get_rarest_piece_min_heap_copy(self):
         with self._rarest_piece_min_heap_lock:
             return self._rarest_piece_min_heap.copy()
@@ -781,7 +814,7 @@ class PeerManager:
         with self._bit_field_lock.read_access:
             return self._my_bitfield[piece_index]
     
-    def get_my_bit_field(self) -> bytes:
+    def get_my_bit_field(self) -> bitstring.BitArray:
         with self._bit_field_lock.read_access:
             return self._my_bitfield.copy()
     
@@ -860,3 +893,9 @@ class PeerManager:
             fd.flush()
             os.fsync(fd.fileno())
             fd.close()
+            
+    def _getSHA1(self):
+        for i in range(self.number_of_pieces):
+            start = i * 20
+            end = start + 20
+            self._pieces_SHA1.append(self._torrent.pieces[start : end])

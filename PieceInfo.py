@@ -97,12 +97,6 @@ class PieceInfo:
             piece = Piece(i, piece_length, self._ready_queue)
             self._totalBlocks += piece.number_of_blocks
             self._pieces.append(piece)
-    
-    def _getSHA1(self):
-        for i in range(self.number_of_pieces):
-            start = i * 20
-            end = start + 20
-            self._pieces_SHA1.append(self._torrent.pieces[start : end])
         
     def write_into_files_enter(self):
         self.write_into_files()

@@ -185,6 +185,13 @@ class Peer:
                 return True
         return False
 
+    def get_abilities(self, client_bf: bitstring.BitArray) -> tuple[bool, bool]:
+        with self._bit_field_lock.read_access:
+            peer_bf = self._bit_field.copy()
+        peer_needs = (client_bf & ~peer_bf).any(True)
+        peer_can_send = (peer_bf & ~client_bf).any(True)
+        return peer_needs, peer_can_send
+
     def connect_to_peer(self):
         if not (0 < self.port < 65536):
             log_info(f"Invalid port number {self.port} for {self.ip}")
