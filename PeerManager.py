@@ -27,6 +27,7 @@ DEFAULT_PIECE_UPDATE_INTERVAL = 3
 RECONNECT_INTERVAL = 10
 OPTIMISTIC_UNCHOKE_INTERVAL = 30
 KEEPALIVE_INTERVAL = 60
+DEFAULT_MONITOR_BLOCK_TIMEOUTS = 5
 DISABLE_FILE_WRITE = True
 
 def RoundUp(x):
@@ -119,7 +120,10 @@ class PeerManager:
         self._receive_queue: queue.Queue[tuple[socket.socket, bytes]] = queue.Queue()
         self._peers_to_clear_queue: queue.Queue[Peer] = queue.Queue()
 
-        self._files = self._load_files(self._torrent.piece_length)
+        self._files = None
+        self._base_path = Path(self._torrent.total_path)
+        self._opened_files = {}  # Path -> file object
+
         self._periodic_piece_peers_thread = threading.Thread(target=self._periodic_piece_peers_update_enter)
         self._periodic_piece_peers_thread.start()
         
@@ -129,9 +133,6 @@ class PeerManager:
         self._reader_thread = threading.Thread(target=self.read_continously_from_sock_enter)
         self._reader_thread.start()
         
-        self.file_thread = threading.Thread(target=self.write_into_files)
-        self.file_thread.start()
-
     def _periodic_piece_peers_update_enter(self):
         self._periodic_piece_peers_update()
         
@@ -189,17 +190,24 @@ class PeerManager:
             return peer in self._connected_peers
 
     def _periodic_piece_peers_update(self):
+        self._load_files(self._torrent.piece_length)
         peer_to_clear:Peer | None = None
-        peer_to_clear_getting_time = time.time()
-        last_piece_update = time.time()
-        last_optimistic_unchoke = time.time()
-        last_peer_update = time.time()
+        current_time = time .time()
+        peer_to_clear_getting_time = current_time
+        last_piece_update = current_time
+        last_optimistic_unchoke = current_time
+        last_peer_update = current_time
+        last_monitor_block_timeouts = current_time
         download_started = False
         PEER_CLEAR_TIMEOUT = 1
-        last_reconnect_to_peers = time.time()
+        last_reconnect_to_peers = current_time
+        last_loop_time = current_time - 5
         while self._running:
+            current_time = time.time()
+            if current_time - last_loop_time < 1:
+                continue
+            last_loop_time = current_time
             try:
-                current_time = time.time()
                 download_started = download_started or self.piece_manager.num_of_downloaded_pieces() + self.piece_manager.num_of_requested_pieces() >= 15
                 update_pieces = (
                     self.need_update_pieces
@@ -225,12 +233,21 @@ class PeerManager:
                     self._reconnect_peers()
                     last_reconnect_to_peers = current_time
                     
+                monitor_block_timeouts = (
+                    (current_time - last_monitor_block_timeouts >= DEFAULT_MONITOR_BLOCK_TIMEOUTS)
+                )
+                if monitor_block_timeouts:
+                    self.piece_manager.monitor_block_timeouts_safe(25)
+                    last_monitor_block_timeouts = current_time
+                    
                 self.piece_manager.print_progress_bar_safe(
                     print_matrix=True,
                     peers=self._get_peers_for_progress()
                 )
 
                 self.monitor_peers_keepalives()
+                
+                self.write_into_files()
                 
                 if not peer_to_clear:
                     try:
@@ -242,22 +259,15 @@ class PeerManager:
                     with peer_to_clear.requested_blocks_per_piece_lock:
                         for piece_index, blocks in enumerate(peer_to_clear.requested_blocks_per_piece):
                             self.piece_manager.set_blocks_empty(piece_index, blocks, True)
-                    # try:
                     self._sock_to_peer.pop(sock)
-                    # except:
-                        # pass
                     peer_to_clear = None
                     
-                time.sleep(1)
+                time.sleep(0.1)
             except Exception as e:
                 log_error(f"Error in rarest piece update thread: {e} \n {traceback.format_exc()}")
                 time.sleep(5)
-    
-    def update_rarest_piece_min_heap(self):
-        res = self.getRarestPieceMinHeap()
-        with self._rarest_piece_min_heap_lock:
-            self._rarest_piece_min_heap = res
-        self.notify()
+                
+        self.close_files()
       
     def monitor_peers_keepalives(self):
         notify_data = b''
@@ -275,6 +285,11 @@ class PeerManager:
             if current_time - peer.last_request_time >= KEEPALIVE_INTERVAL:
                 self.send_data(peer, keep_alive().byteStringForKeepAlive())
                 
+    def update_rarest_piece_min_heap(self):
+        res = self.getRarestPieceMinHeap()
+        with self._rarest_piece_min_heap_lock:
+            self._rarest_piece_min_heap = res
+        self.notify()    
         
     def request_piece_update(self):
         self.need_update_pieces = True
@@ -800,41 +815,36 @@ class PeerManager:
                 piece_offset += chunk
                 file_offset += chunk
 
-        return files_by_piece
-    
-    def write_into_files(self):
-        base = Path(self._torrent.total_path)
-        open_files = {}  # Path -> file object
+        self._files = files_by_piece
 
-        # Подготовить директории
         dirs = {
-            base.joinpath(*entry['path']).parent
+            self._base_path.joinpath(*entry['path']).parent
             for lst in self._files.values()
             for entry in lst
         }
         for d in dirs:
             d.mkdir(parents=True, exist_ok=True)
 
+        
+    
+    def write_into_files(self):
         while True:
             try:
-                idx, blocks = self._ready_queue.get(timeout=5)
+                idx, blocks = self._ready_queue.get_nowait()
             except queue.Empty:
-                if not self._running: 
-                    break 
-                else: 
-                    continue
+                return
             data = b"".join(blocks)
             self.set_bit_in_bit_field(idx)
             self._pieces_to_notify.put(idx)
             if not DISABLE_FILE_WRITE:
                 for entry in self._files.get(idx, []):
                     rel_path = entry['path']
-                    full_path = base.joinpath(*rel_path)
-                    fd = open_files.get(full_path)
+                    full_path = self._base_path.joinpath(*rel_path)
+                    fd = self._opened_files.get(full_path)
                     if fd is None:
                         mode = 'r+b' if full_path.exists() else 'wb'
                         fd = full_path.open(mode)
-                        open_files[full_path] = fd
+                        self._opened_files[full_path] = fd
 
                     start = entry['piece_offset']
                     end = start + entry['length']
@@ -843,9 +853,10 @@ class PeerManager:
                     fd.write(chunk)
                     fd.flush()
 
-            # print(i)
-            
-        for fd in open_files.values():
+                # print(i)
+        
+    def close_files(self):
+        for fd in self._opened_files.values():
             fd.flush()
             os.fsync(fd.fileno())
             fd.close()

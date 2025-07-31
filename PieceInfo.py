@@ -6,13 +6,10 @@ import os
 import datetime
 from datetime import datetime
 from peer import Peer
-from rwlock import RWLock
 import threading
 import traceback
 import queue
 from typing import Iterator
-
-DISABLE_FILE_WRITE = True
 
 def RoundUp(x):
     return ((x + 7) & (-8))
@@ -67,7 +64,7 @@ def log_info(msg, flags = None, name = ''):
         f.write(res)
 
 class PieceInfo:
-    def __init__(self, torrent, ready_queue):
+    def __init__(self, torrent: Torrent, ready_queue):
         self._total_length = torrent.total_length
         self._piece_length = torrent.piece_length
         self.number_of_pieces = ceil(self._total_length / self._piece_length)
@@ -89,8 +86,6 @@ class PieceInfo:
         self._speed_history = []
         
         self.running = True
-        self._monitor_timeouts_thread = threading.Thread(target=self.monitor_block_timeouts_safe_enter)
-        self._monitor_timeouts_thread.start()
 
     def _generate_pieces(self):
         last_piece = self.number_of_pieces - 1
@@ -108,9 +103,6 @@ class PieceInfo:
             start = i * 20
             end = start + 20
             self._pieces_SHA1.append(self._torrent.pieces[start : end])
-
-    def monitor_block_timeouts_safe_enter(self):
-        self.monitor_block_timeouts_safe()
         
     def write_into_files_enter(self):
         self.write_into_files()
@@ -308,11 +300,9 @@ class PieceInfo:
                 matrix.append(' ')  # Not downloaded
         return matrix
 
-    def monitor_block_timeouts_safe(self, check_interval=5, timeout=25):
-        while self.running:
-            for piece_index, piece in enumerate(self._pieces):
-                self.set_blocks_empty(piece_index, piece.get_blocks_to_reset(timeout))
-            time.sleep(check_interval)
+    def monitor_block_timeouts_safe(self, timeout: int):
+        for piece_index, piece in enumerate(self._pieces):
+            self.set_blocks_empty(piece_index, piece.get_blocks_to_reset(timeout))
     def set_blocks_empty(self, piece_index, bad_blocks, skip_notify: bool = False):    
         if bad_blocks:
             cur_time = time.time()
