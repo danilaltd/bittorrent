@@ -61,7 +61,7 @@ class have:
     message_ID = 4
     def __init__(self, piece_index) -> None:
         self.piece_index = piece_index
-    def byteStringForBitfield(self):
+    def byteStringForHave(self):
         return struct.pack(">IBI", self.length, self.message_ID, self.piece_index)
 
 class Bitfield:
@@ -87,18 +87,15 @@ class request:
 
 class pieceMessage:
     # piece: <len=0009+X><id=7><index><begin><block>
-    length = None
     message_ID = 7
-    def __init__(self):
-        return
-    @classmethod
-    def parse_response(cls, response):
-        block_length = len(response) - 13
-        length, message_ID, piece_index, block_offset , block= struct.unpack(f">IBII{block_length}s", response)
-        if cls.message_ID == message_ID:
-            return (piece_index, block_length, block_offset, block)      
-        else:
-            return -1
+    def __init__(self, piece_index, piece_offset, block_length, data: bytes):
+        self.piece_index = piece_index
+        self.piece_offset = piece_offset
+        self.block_length = block_length
+        self.length = 9 + len(data)
+        self.data = data
+    def byteStringForPiece(self):
+        return struct.pack(">IBII", self.length, self.message_ID, self.piece_index, self.piece_offset) + self.data
         
 class cancel:
     # cancel: <len=0013><id=8><index><begin><length>

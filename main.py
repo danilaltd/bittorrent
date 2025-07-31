@@ -197,7 +197,11 @@ def main():
     
     # torrent = os.path.join('torrents', 'The_Jackbox_Party_Pack_3_MANY_PEERS_680MB.torrent')
     # torrent = os.path.join('torrents', 'REPO_300.torrent')
-    torrent = os.path.join('torrents', 'music.torrent')
+    # torrent = os.path.join('torrents', 'music.torrent')
+    # torrent = os.path.join('torrents', 'manyLeeches5.torrent')
+    torrent = os.path.join('torrents', 'Andr.torrent')
+    # torrent = os.path.join('torrents', 'ninja.torrent')
+    # torrent = os.path.join('torrents', 'FoxLake.torrent')
     # torrent = os.path.join('torrents', '245_rut.torrent')
     # torrent = os.path.join('torrents', 'Photoshop_4gb.torrent')
     # torrent = os.path.join('torrents', 'Photoshop_2.58gb_rutr.torrent')

@@ -114,6 +114,7 @@ class PeerManager:
         self._rarest_piece_min_heap_lock = threading.Lock()
         self.need_update_pieces = True
         self.notify = notify
+        self.uploaded = 0
         
         self._selector = selectors.DefaultSelector()
         
@@ -123,11 +124,12 @@ class PeerManager:
         self._send_queues: dict[socket.socket, queue.Queue] = {}
         self._handshake_completed: dict[socket.socket, bool] = {}
         self._sock_to_peer: dict[socket.socket, Peer] = {}
-        
+
         self._pieces_to_notify: queue.Queue[int] = queue.Queue()
         
         self._receive_queue: queue.Queue[tuple[socket.socket, bytes]] = queue.Queue()
         self._peers_to_clear_queue: queue.Queue[Peer] = queue.Queue()
+        self._request_queue: queue.Queue[tuple[Peer, int, int, int]] = queue.Queue()
 
         self._periodic_piece_peers_thread = threading.Thread(target=self._periodic_piece_peers_update_enter)
         self._periodic_piece_peers_thread.start()
@@ -210,6 +212,8 @@ class PeerManager:
             current_time = time.time()
             if current_time - last_loop_time < 1:
                 continue
+            print(current_time - last_loop_time)
+            print(f"uploaded: {self.uploaded}")
             last_loop_time = current_time
             try:
                 download_started = download_started or self.piece_manager.num_of_downloaded_pieces() + self.piece_manager.num_of_requested_pieces() >= 15
@@ -251,6 +255,7 @@ class PeerManager:
 
                 self.monitor_peers_keepalives()
                 
+                self.handle_requests()
                 self.write_into_files()
                 
                 if not peer_to_clear:
@@ -274,18 +279,32 @@ class PeerManager:
         self.close_files()
       
     def monitor_peers_keepalives(self):
-        notify_data = b''
+        notify_data_bytearray = bytearray()
         while True:
             try:
                 piece_index = self._pieces_to_notify.get_nowait()
+                notify_data_bytearray.extend(have(piece_index).byteStringForHave())
             except queue.Empty:
                 break
-            notify_data += have(piece_index).byteStringForBitfield()
+        notify_data = bytes(notify_data_bytearray)
         connected_peers = self.get_connected_peers_copy()
         current_time = time.time()
         for peer in connected_peers:
             if notify_data and peer.bit_field_sent:
                 self.send_data(peer, notify_data)
+            if peer.initial_have and peer.initial_have_put_time and peer.bit_field_sent and peer._got_bit_field and current_time - peer.initial_have_put_time >= 5:
+                print(f"initial haves to {peer.ip_port}")
+                notify_data_peer_bytearray = bytearray()
+                while True:
+                    try:
+                        piece_index = peer.initial_have.get_nowait()
+                        notify_data_peer_bytearray.extend(have(piece_index).byteStringForHave())
+                    except queue.Empty:
+                        break
+                if notify_data_peer_bytearray:
+                    self.send_data(peer, bytes(notify_data_peer_bytearray))
+                peer.initial_have = None
+                peer.initial_have_put_time = None
             peer_needs, peer_can_send = peer.get_abilities(self.get_my_bit_field())
             if peer_needs:
                 if peer.peer_interested:
@@ -364,7 +383,7 @@ class PeerManager:
                     if self._get_connected_peers_count() >= MAX_CONNECTED_PEER:
                         break
                     try:
-                        if peer.bad_peer or peer.connecting or peer.connected:
+                        if peer.bad_peer or peer.connecting or peer.connected or (not peer.peer_can_send and not peer.peer_needs and peer._got_bit_field and self.bit_field_ready):
                             continue
                         self.launch_thread(peer)
                     except Exception as e:
@@ -510,17 +529,6 @@ class PeerManager:
                     peer = self._get_peer_by_sock(sock)
                     if msg and peer:
                         try:
-                            message_length = msg[:4]
-                            
-                            if not message_length:
-                                log_error(f"Invalid message length from {peer.ip_port}: {len(message_length)}", flags = ['Reading'], name=f'{peer.ip_port}.log')
-                                continue
-                                
-                            message_length = struct.unpack(">I", message_length)[0]
-                            # log_info(f"{peer.ip_port}: got message with {message_length} bytes", flags = ['Reading'], name=f'{peer.ip_port}.log')
-                            if message_length == 0:
-                                continue
-                            
                             if peer.connecting:
                                 try:
                                     if len(msg) == 68:
@@ -546,6 +554,19 @@ class PeerManager:
                                     peer.connecting = False
                                     peer.bad_peer = True
                             else:
+                                message_length_bytes = msg[:4]
+                            
+                                if not message_length_bytes:
+                                    log_error(f"Invalid message length from {peer.ip_port}: {len(message_length)}", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                    continue
+                                    
+                                message_length = struct.unpack(">I", message_length_bytes)[0]
+                                # log_info(f"{peer.ip_port}: got message with {message_length} bytes", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                if message_length == 0:
+                                    continue
+                                if message_length + 4 != len(msg):
+                                    log_error(f"Invalid message: expected len: {message_length+4}, real{len(msg)}", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                    continue
                                 message_ID = msg[4:5]
                                 if not message_ID:
                                     log_error(f"Invalid message ID from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}.log')
@@ -568,43 +589,26 @@ class PeerManager:
                                     peer.peer_interested = False
                                     log_info(f"Peer {peer.ip_port} is not interested", flags = ['Reading'], name=f'{peer.ip_port}.log')
                                 elif message_ID_u == 4:  # Have
-                                    if message_length - 1 == 4:
-                                        piece_index = msg[5:9]
-                                        if piece_index:
-                                            piece_index = struct.unpack(">I", piece_index)[0]
-                                        else:
-                                            log_error(f"{peer.ip_port} 'have' message: couldn't read piece_index", flags = ['Reading'], name=f'{peer.ip_port}.log')
-                                            continue
-                                        if peer.set_bit_in_bit_field(piece_index):
-                                            log_info(f"{peer.ip_port} 'have' message received for piece {piece_index}", flags = ['Reading'], name=f'{peer.ip_port}.log')
-                                            self.request_piece_update()
-                                        else:
-                                            log_info(f"{peer.ip_port} 'have' message: piece_index ({piece_index}, more or eq than {len(peer.bit_field)}) or already set", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                    piece_index = msg[5:9]
+                                    if piece_index:
+                                        piece_index = struct.unpack(">I", piece_index)[0]
                                     else:
-                                        log_error(f"{peer.ip_port} 'have' message: wrong length ({message_length}, not 5)", flags = ['Reading'], name=f'{peer.ip_port}.log')
-                                elif message_ID_u == 5:  # Bitfield
-                                    bitfield_length = message_length - 1
-                                    
-                                    bitfield_data = msg[5:5 + bitfield_length]
-                                    if bitfield_data:
-                                        if len(bitfield_data) == bitfield_length:
-                                            peer.set_bit_field(bitfield_data)
-                                            self.request_piece_update()
-                                            log_info(f"Received valid bitfield from {peer.ip_port}: length is {len(bitfield_data)}", flags = ['Reading'], name=f'{peer.ip_port}.log')
-                                        else:
-                                            log_error(f"Received invalid bitfield from {peer.ip_port}: length is {len(bitfield_data)}, need {bitfield_length}", flags = ['Reading'], name=f'{peer.ip_port}.log')
-                                    else:
-                                        log_error(f"bitfield: couldn't read bitfield_data", flags = ['Reading'], name=f'{peer.ip_port}.log')
-                                elif message_ID_u == 6:  # Request
-                                    log_info(f"Received request from {peer.ip_port}", flags = ['Reading'], name=f'{peer.ip_port}.log')
-                                    data = msg[5:17]
-                                    if data:
-                                        pass
-                                    else:
-                                        log_error(f"Request: couldn't read request data", flags = ['Reading'], name=f'{peer.ip_port}.log')
-                                        
-                                    if len(data) < 12:
+                                        log_error(f"{peer.ip_port} 'have' message: couldn't read piece_index", flags = ['Reading'], name=f'{peer.ip_port}.log')
                                         continue
+                                    if peer.set_bit_in_bit_field(piece_index):
+                                        log_info(f"{peer.ip_port} 'have' message received for piece {piece_index}", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                        self.request_piece_update()
+                                    else:
+                                        log_info(f"{peer.ip_port} 'have' message: piece_index ({piece_index}, more or eq than {len(peer.bit_field)}) or already set", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                elif message_ID_u == 5:  # Bitfield
+                                    bitfield_data = msg[5:]
+                                    peer.set_bit_field(bitfield_data)
+                                    self.request_piece_update()
+                                    log_info(f"Received valid bitfield from {peer.ip_port}: length is {len(bitfield_data)}", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                elif message_ID_u == 6:  # Request
+                                    piece_index, piece_offset, block_length = struct.unpack(">III", msg[5:])
+                                    # log_info(f"request {piece_index}:{piece_offset}:{block_length}", flags = ['Reading'], name=f'{peer.ip_port}.log')
+                                    self._request_queue.put((peer, piece_index, piece_offset, block_length))
                                 elif message_ID_u == 7:  # Piece
                                     try:
                                         piece_index_b = msg[5:9]
@@ -615,11 +619,10 @@ class PeerManager:
                                         if not block_offset_b:
                                             log_error(f"Invalid piece_index_b from {peer.ip_port}: {block_offset_b}", flags = ['Reading'], name=f'{peer.ip_port}.log')
                                             continue
-                                        piece_index = struct.unpack(">I", piece_index_b)[0]
-                                        block_offset = struct.unpack(">I", block_offset_b)[0]
+                                        piece_index, block_offset = struct.unpack(">II", msg[5:13])
                                         block_index = block_offset // BLOCK_SIZE
                                         
-                                        block_data = msg[13:message_length + 4]
+                                        block_data = msg[13:]
                                         if block_data is None:
                                             log_error(f"Invalid piece {piece_index} from {peer.ip_port}: couldn't read data", flags = ['Reading'], name=f'{peer.ip_port}.log')
                                             continue
@@ -633,6 +636,9 @@ class PeerManager:
                                     except Exception as e:
                                         log_error(f"Error processing piece message from {peer.ip_port}", e)
                                         continue
+                                elif message_ID_u == 8:  # Request
+                                    piece_index, piece_offset, block_length = struct.unpack(">III", msg[5:])
+                                    log_info(f"cancel {piece_index}:{piece_offset}:{block_length}", flags = ['Reading'], name=f'{peer.ip_port}.log')
                                 else:
                                     log_error(f"Unsupported message from {peer.ip_port}: message length: {message_length}, id: {message_ID_u}", flags = ['Reading'], name=f'{peer.ip_port}.log')
                                 
@@ -684,6 +690,7 @@ class PeerManager:
             if self._is_peer_connected(peer):
                     self._remove_connected_peer(peer)
             self._peers_to_clear_queue.put((peer, peer.sock))
+            peer.get_abilities(self.get_my_bit_field())
             peer.close()
             ip_port = peer.ip_port
             return ip_port
@@ -769,28 +776,51 @@ class PeerManager:
             self._last_optimistic_unchoke = current_time
 
     def send_cancel(self, peer: Peer, piece_index, block_index):
+        log_info(f"{peer.ip_port} send_cancel", name=f'{peer.ip_port}.log')
         self.send_data(peer, cancel(piece_index, block_index * BLOCK_SIZE, self.piece_manager.get_block_size(piece_index, block_index)).byteStringForCancel())
 
     def send_choke(self, peer: Peer):
+        log_info(f"{peer.ip_port} send_choke", name=f'{peer.ip_port}.log')
         self.send_data(peer, chocke().byteStringForChoke())
         peer.am_choking = True
         
     def send_unchoke(self, peer: Peer):
+        log_info(f"{peer.ip_port} send_unchoke", name=f'{peer.ip_port}.log')
         self.send_data(peer, unchoke().byteStringForUnchoke())
         peer.am_choking = False
         
     def send_interested(self, peer: Peer):
+        log_info(f"{peer.ip_port} send_interested", name=f'{peer.ip_port}.log')
         self.send_data(peer, interested().byteStringForInterested())
         peer.am_interested = True
         
     def send_not_interested(self, peer: Peer):
+        log_info(f"{peer.ip_port} send_not_interested", name=f'{peer.ip_port}.log')
         self.send_data(peer, not_interested().byteStringForNotInterested())
         peer.am_interested = False
         
     def send_bit_field(self, peer: Peer):
+        log_info(f"{peer.ip_port} send_bit_field {peer._have_pieces}", name=f'{peer.ip_port}.log')
         peer.bit_field_sent = True
         if self.bit_field_ready:
-            self.send_data(peer, Bitfield(self.get_my_bit_field()).byteStringForBitfield())
+            bf, bits = self.prepare_bit_field(self.get_my_bit_field())
+            self.send_data(peer, Bitfield(bf).byteStringForBitfield())
+            peer.initial_have = queue.Queue()
+            for bit in bits:
+                peer.initial_have.put(bit)
+            peer.initial_have_put_time = time.time()
+        
+    def prepare_bit_field(self, bitfield: bitstring.BitArray) -> tuple[bitstring.BitArray, list[int]]:  
+        zeroed_bits = []
+        num_pieces = self.piece_manager.number_of_pieces
+        set_indices = [i for i in range(num_pieces) if bitfield[i]]
+        max_to_zero = min(15, len(set_indices), num_pieces // 2)
+        to_zero = random.sample(set_indices, max_to_zero)
+        for idx in to_zero:
+            bitfield[idx] = False
+            zeroed_bits.append(idx)
+
+        return bitfield, zeroed_bits
     
     def get_rarest_piece_min_heap_copy(self):
         with self._rarest_piece_min_heap_lock:
@@ -890,12 +920,24 @@ class PeerManager:
                     
         return downloaded_pieces
                     
+    def handle_requests(self):
+        i = 0
+        while True:
+            try:
+                peer, piece_index, piece_offset, block_length = self._request_queue.get_nowait()
+                data = self.get_piece_data(piece_index, piece_offset, block_length)
+                self.send_data(peer, pieceMessage(piece_index, piece_offset, block_length, data).byteStringForPiece())
+                i += 1
+            except queue.Empty:
+                break
+        self.uploaded += i
+    
     def write_into_files(self):
         while True:
             try:
                 idx, blocks = self._ready_queue.get_nowait()
             except queue.Empty:
-                return
+                break
             data = b"".join(blocks)
             self.set_bit_in_bit_field(idx)
             self._pieces_to_notify.put(idx)
@@ -928,3 +970,37 @@ class PeerManager:
         for i in range(number_of_pieces):
             res.append(pieces[i * 20 : i * 20 + 20])
         return res
+    
+    def get_piece_data(self, piece_index: int, piece_offset: int, length: int) -> bytes:
+        result = bytearray(length)
+
+        entries = self._files.get(piece_index, [])
+        for entry in entries:
+            entry_piece_start = entry['piece_offset']
+            entry_piece_end = entry_piece_start + entry['length']
+
+            req_start = piece_offset
+            req_end = piece_offset + length
+            overlap_start = max(req_start, entry_piece_start)
+            overlap_end = min(req_end, entry_piece_end)
+            if overlap_end <= overlap_start:
+                continue
+
+            read_len = overlap_end - overlap_start
+            overlap_piece_offset = overlap_start - entry_piece_start
+            file_offset = entry['file_offset'] + overlap_piece_offset
+
+            full_path = self._base_path.joinpath(*entry['path'])
+            fd = self._opened_files.get(full_path)
+            if fd is None or fd.mode == 'wb':
+                mode = 'r+b'
+                fd = full_path.open(mode)
+                self._opened_files[full_path] = fd
+
+            fd.seek(file_offset)
+            chunk = fd.read(read_len)
+
+            result_segment_offset = overlap_start - piece_offset
+            result[result_segment_offset:result_segment_offset + read_len] = chunk
+        
+        return bytes(result)

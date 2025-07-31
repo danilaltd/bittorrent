@@ -7,6 +7,7 @@ import os
 from rwlock import RWLock
 import traceback
 import threading
+import queue
 
 MAX_CONNECTION_ATTEMPTS = 3
 MAX_PENDING_REQUESTS = 64
@@ -78,6 +79,7 @@ class Peer:
         self.sock: socket.socket = None
         self._bit_field = bitstring.BitArray(RoundUp(number_of_pieces))
         self._bit_field_len = 0
+        self._have_pieces = 0
         self._bit_field_lock = RWLock("_bit_field_lock")
         self._got_bit_field = False
         self.ip_port: tuple[str, int] = ip_port
@@ -96,8 +98,6 @@ class Peer:
         self.connected = False
         self.handshake_sent = False
         self.handshake_received = False
-        self._last_activity = time.time()
-        self._last_activity_lock = RWLock("_last_activity_lock")
         self._requests_sent = 0
         self._requests_sent_lock = RWLock("_requests_sent_lock")
         self._pending_requests = 0
@@ -105,7 +105,8 @@ class Peer:
         self._last_request_time = time.time()
         self.bad_peer = False
         self.connecting = False
-        
+        self.peer_needs = True
+        self.peer_can_send = True
         self._last_update_time = time.time()
         self._last_blocks_done = 0
         self._last_bytes_done = 0
@@ -114,7 +115,8 @@ class Peer:
         self.canceled_requests = 0
         self.requested_blocks_per_piece: list[set[int]] = [set() for _ in range(number_of_pieces)]
         self.requested_blocks_per_piece_lock = threading.Lock()
-        
+        self.initial_have: queue.Queue[int] | None = None
+        self.initial_have_put_time: float | None = None
         self.send_cancel = send_cancel
         
     @property
@@ -125,17 +127,6 @@ class Peer:
     def uploaded(self, value):
         with self._uploaded_lock.write_access:
             self._uploaded = value
-
-    @property
-    def last_activity(self):
-        with self._last_activity_lock.read_access:
-            return self._last_activity
-    @last_activity.setter
-    def last_activity(self, value):
-        mem = self.last_activity
-        if mem is None or value is None or value - mem >= 1:
-            with self._last_activity_lock.write_access:
-                self._last_activity = value
 
     @property
     def requests_sent(self):
@@ -168,6 +159,8 @@ class Peer:
     def set_bit_field(self, data):
         with self._bit_field_lock.write_access:
             self._bit_field = bitstring.BitArray(data)
+            self._have_pieces = self._bit_field.count(1)
+            print(f"{self.ip_port} got bf {self._have_pieces}")
             self._bit_field_len = len(self._bit_field)
             self._got_bit_field = self._bit_field_len != 0
             
@@ -181,6 +174,7 @@ class Peer:
         if not self.is_bit_set_in_bit_field(piece_index) and self._bit_field_len > piece_index:
             with self._bit_field_lock.write_access:
                 self._bit_field[piece_index] = 1
+                self._have_pieces += 1
                 self._got_bit_field = True
                 return True
         return False
@@ -188,9 +182,9 @@ class Peer:
     def get_abilities(self, client_bf: bitstring.BitArray) -> tuple[bool, bool]:
         with self._bit_field_lock.read_access:
             peer_bf = self._bit_field.copy()
-        peer_needs = (client_bf & ~peer_bf).any(True)
-        peer_can_send = (peer_bf & ~client_bf).any(True)
-        return peer_needs, peer_can_send
+        self.peer_needs = (client_bf & ~peer_bf).any(True)
+        self.peer_can_send = (peer_bf & ~client_bf).any(True)
+        return self.peer_needs, self.peer_can_send
 
     def connect_to_peer(self):
         if not (0 < self.port < 65536):
@@ -237,7 +231,6 @@ class Peer:
             current_time = time.time()
             self.sock = sock
             self.ip_port = ip_port
-            self.update_activity(current_time)
             self.connection_attempts = 0
             self.connected = True
             self.connection_time = current_time
@@ -249,7 +242,7 @@ class Peer:
             self.peer_choking = True
             self.peer_interested = False
             
-            log_info(f"Successfull connection to {ip_port}: {time.time() - current_time}")
+            log_info(f"Successfull connection to {ip_port}")
             return True
             
         except socket.timeout:
@@ -298,11 +291,6 @@ class Peer:
             except:
                 pass
 
-    def update_activity(self, current_time = None):
-        if current_time is None:
-            current_time = time.time()
-        self.last_activity = current_time
-        
     def peer_score(self):
         if self.peer_choking or not self.connected or self.pending_requests > 1024 or self.pending_requests > max(32, (self._download_speed / (1024 * 1024)) * MAX_PENDING_REQUESTS):
             return float('-inf')

@@ -197,6 +197,7 @@ class PieceInfo:
         
     def _peer_stats_string_internal(self, peers: list[Peer]):
         """Internal method for peer stats string without locks"""
+        number_of_pieces = self.number_of_pieces
         res = ''
         try:
             res += '\nPeers: %d' % len(peers)
@@ -268,7 +269,8 @@ class PieceInfo:
                 strings.append(f"Canceled: {peer.canceled_requests:<7}")
                 strings.append(f"Bad: {'+' if peer.bad_peer else '-':<3}")
                 strings.append(f"Unchocked: {'+' if not peer.peer_choking else '-':<3}")
-                strings.append(f"Speed: {speed_str:<7}")
+                strings.append(f"Speed: {speed_str:<10}")
+                strings.append(f"Precent: {100 * (peer._have_pieces / number_of_pieces):<15.2f}")
                 table += ' '.join(strings) + '\n'
         except Exception as e:
             res += f'\n[Peer stats error: {e}]\n'
