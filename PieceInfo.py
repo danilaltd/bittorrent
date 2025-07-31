@@ -64,38 +64,37 @@ def log_info(msg, flags = None, name = ''):
         f.write(res)
 
 class PieceInfo:
-    def __init__(self, torrent: Torrent, ready_queue):
+    def __init__(self, torrent: Torrent, ready_queue, downloaded_pieces: set[int]):
         self._total_length = torrent.total_length
         self._piece_length = torrent.piece_length
         self.number_of_pieces = ceil(self._total_length / self._piece_length)
         self._pieces: list[Piece] = []
         
-        self._status_counts = [self.number_of_pieces, 0, 0]
+        self._status_counts = [self.number_of_pieces - len(downloaded_pieces), 0, len(downloaded_pieces)]
         self._status_counts_lock = threading.Lock()
         
         self._pieces_statuses = [Status.EMPTY] * self.number_of_pieces
         
-        self.downloaded_blocks= 0
+        self.downloaded_blocks = self._last_blocks_done = sum(self._get_block_len(i) for i in downloaded_pieces)
         self._totalBlocks = 0
         self._ready_queue: queue.Queue[tuple[int, list[bytes]]] = ready_queue
-        self._generate_pieces()
+        self._generate_pieces(downloaded_pieces)
         self._last_update_time = time.time()
-        self._last_blocks_done = 0
-        self._last_bytes_done = 0
         self._download_speed = 0
         self._speed_history = []
         
         self.running = True
 
-    def _generate_pieces(self):
+    def _generate_pieces(self, downloaded_pieces: set[int]):
         last_piece = self.number_of_pieces - 1
         for i in range(self.number_of_pieces):
             if i == last_piece:
                 piece_length = self._total_length - (self.number_of_pieces - 1) * self._piece_length
             else:
                 piece_length = self._piece_length
-            piece = Piece(i, piece_length, self._ready_queue)
-            self._totalBlocks += piece.number_of_blocks
+            downloaded = i in downloaded_pieces
+            piece = Piece(i, piece_length, self._ready_queue, downloaded)
+            self._totalBlocks += self._get_block_len(i)
             self._pieces.append(piece)
         
     def write_into_files_enter(self):
@@ -129,8 +128,7 @@ class PieceInfo:
         time_diff = current_time - self._last_update_time
         if time_diff >= 0.5:
             blocks_done = self.downloaded_blocks
-            current_bytes = blocks_done * BLOCK_SIZE
-            bytes_diff = current_bytes - self._last_bytes_done
+            bytes_diff = (blocks_done - self._last_blocks_done) * BLOCK_SIZE
             
             current_speed = bytes_diff / time_diff if time_diff > 0 else 0
             
@@ -142,7 +140,6 @@ class PieceInfo:
             
             self._last_update_time = current_time
             self._last_blocks_done = blocks_done
-            self._last_bytes_done = current_bytes
 
         # Format speed
         if self._download_speed > 1024 * 1024:
@@ -313,6 +310,9 @@ class PieceInfo:
         else:
             res = self._piece_length
         return res
+    
+    def _get_block_len(self, piece_index: int):
+        return (self._get_piece_size(piece_index) + BLOCK_SIZE - 1) // BLOCK_SIZE
     
     def get_block_size(self, piece_index, block_index):
         piece_size = self._get_piece_size(piece_index)

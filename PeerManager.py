@@ -17,6 +17,9 @@ from itertools import groupby
 import selectors
 import queue
 from pathlib import Path
+from typing import BinaryIO
+from math import ceil
+import hashlib
 
 
 MAX_CONNECTED_PEER = 50
@@ -28,7 +31,7 @@ RECONNECT_INTERVAL = 10
 OPTIMISTIC_UNCHOKE_INTERVAL = 30
 KEEPALIVE_INTERVAL = 60
 DEFAULT_MONITOR_BLOCK_TIMEOUTS = 5
-DISABLE_FILE_WRITE = True
+DISABLE_FILE_WRITE = False
 
 def RoundUp(x):
     return ((x + 7) & (-8))
@@ -91,13 +94,19 @@ class PeerManager:
         self._peers_ip_port_lock = RWLock("_peers_ip_port_lock")
         self._connected_peers: list[Peer] = []
         self._connected_peers_lock = RWLock("_connected_peers_lock")
-        self._torrent: Torrent = tracker_obj.torrent_obj
         self._ready_queue: queue.Queue[tuple[int, list[bytes]]] = queue.Queue()
-        self.piece_manager = PieceInfo(tracker_obj.torrent_obj, self._ready_queue)
-        self._my_bitfield = bitstring.BitArray(RoundUp(self.piece_manager.number_of_pieces))
+        number_of_pieces = ceil(tracker_obj.torrent_obj.total_length / tracker_obj.torrent_obj.piece_length)
+        self._SHA1s: list[bytes] = self._getSHA1(number_of_pieces, tracker_obj.torrent_obj.pieces)
+        self._my_bitfield = bitstring.BitArray(RoundUp(number_of_pieces))
         self.bit_field_ready = False
         self._bit_field_lock = RWLock("")
         self._bit_field_len = len(self._my_bitfield)
+        self._files = None
+        self._base_path = Path(tracker_obj.torrent_obj.total_path)
+        self._opened_files: dict[Path, BinaryIO] = {}
+        self._load_files(tracker_obj.torrent_obj.piece_length, tracker_obj.torrent_obj.files)
+        downloaded_pieces = self.get_downloaded_pieces()
+        self.piece_manager = PieceInfo(tracker_obj.torrent_obj, self._ready_queue, downloaded_pieces)
         self.torrent_completed = False
         self._optimistic_unchoke_peer: Peer = None
         self._running = True
@@ -119,10 +128,6 @@ class PeerManager:
         
         self._receive_queue: queue.Queue[tuple[socket.socket, bytes]] = queue.Queue()
         self._peers_to_clear_queue: queue.Queue[Peer] = queue.Queue()
-
-        self._files = None
-        self._base_path = Path(self._torrent.total_path)
-        self._opened_files = {}  # Path -> file object
 
         self._periodic_piece_peers_thread = threading.Thread(target=self._periodic_piece_peers_update_enter)
         self._periodic_piece_peers_thread.start()
@@ -190,7 +195,6 @@ class PeerManager:
             return peer in self._connected_peers
 
     def _periodic_piece_peers_update(self):
-        self._load_files(self._torrent.piece_length)
         peer_to_clear:Peer | None = None
         current_time = time .time()
         peer_to_clear_getting_time = current_time
@@ -818,25 +822,22 @@ class PeerManager:
         with self._bit_field_lock.read_access:
             return self._my_bitfield.copy()
     
-    def _load_files(self, piece_length: int):
-        files_by_piece = {}
+    def _load_files(self, piece_length: int, files):
+        files_by_piece: dict[int, list[dict[str, int | list[str]]]] = {}
         piece_offset = 0
 
-        for file_info in self._torrent.files:
+        for file_info in files:
             remaining = file_info['length']
             file_offset = 0
             path = file_info['path']
 
             while remaining > 0:
                 piece_index, offset_in_piece = divmod(piece_offset, piece_length)
-                # space left in current piece
                 space_left = piece_length - offset_in_piece
                 chunk = min(remaining, space_left)
 
-
                 block = {
                     'length': chunk,
-                    'piece_index': piece_index,
                     'file_offset': file_offset,
                     'piece_offset': offset_in_piece,
                     'path': path
@@ -857,9 +858,38 @@ class PeerManager:
         }
         for d in dirs:
             d.mkdir(parents=True, exist_ok=True)
+            
+    def get_downloaded_pieces(self) -> set[int]:
+        opened_files: dict[Path, BinaryIO] = {}
+        downloaded_pieces: set[int] = set()
+        for piece_index, blocks in sorted(self._files.items()):
+            sha1_calc = hashlib.sha1()
+            total_read = 0
 
-        
-    
+            for entry in blocks:
+                full_path: Path = self._base_path.joinpath(*entry['path'])
+                fd = opened_files.get(full_path)
+                if fd is None:
+                    if full_path.exists():
+                        fd = full_path.open('rb')
+                        opened_files[full_path] = fd
+                    else:
+                        break
+                fd.seek(entry['file_offset'])
+                data = fd.read(entry['length'])
+                if len(data) < entry['length']:
+                    break
+                sha1_calc.update(data)
+                total_read += len(data)
+            else:
+                expected = self._SHA1s[piece_index].hex()
+                actual = sha1_calc.hexdigest()
+                if actual == expected:
+                    self.set_bit_in_bit_field(piece_index)
+                    downloaded_pieces.add(piece_index)
+                    
+        return downloaded_pieces
+                    
     def write_into_files(self):
         while True:
             try:
@@ -871,8 +901,7 @@ class PeerManager:
             self._pieces_to_notify.put(idx)
             if not DISABLE_FILE_WRITE:
                 for entry in self._files.get(idx, []):
-                    rel_path = entry['path']
-                    full_path = self._base_path.joinpath(*rel_path)
+                    full_path = self._base_path.joinpath(*entry['path'])
                     fd = self._opened_files.get(full_path)
                     if fd is None:
                         mode = 'r+b' if full_path.exists() else 'wb'
@@ -894,8 +923,8 @@ class PeerManager:
             os.fsync(fd.fileno())
             fd.close()
             
-    def _getSHA1(self):
-        for i in range(self.number_of_pieces):
-            start = i * 20
-            end = start + 20
-            self._pieces_SHA1.append(self._torrent.pieces[start : end])
+    def _getSHA1(self, number_of_pieces: int, pieces):
+        res: list[bytes] = []
+        for i in range(number_of_pieces):
+            res.append(pieces[i * 20 : i * 20 + 20])
+        return res

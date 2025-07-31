@@ -16,20 +16,21 @@ class Status(Enum):
     DOWNLOADED = 2
 
 class Piece:
-    def __init__(self, piece_index: int, piece_size: int, ready_queue: queue.Queue[tuple[int, list[bytes]]]):
+    def __init__(self, piece_index: int, piece_size: int, ready_queue: queue.Queue[tuple[int, list[bytes]]], downloaded: bool):
         self._piece_index: int = piece_index
-        self.piece_size: int = piece_size
-        self.number_of_blocks = ceil(self.piece_size / BLOCK_SIZE)
+        self._piece_size: int = piece_size
+        self.number_of_blocks = (piece_size + BLOCK_SIZE - 1) // BLOCK_SIZE
         
-        self._blocks_empty = (1 << self.number_of_blocks) - 1
+        self._blocks_empty = 0 if downloaded else (1 << self.number_of_blocks) - 1
         self._blocks_empty_lock = threading.Lock()
         
-        self._blocks_requested = (1 << self.number_of_blocks) - 1
+        self._blocks_requested = 0
         self._blocks_requested_lock = threading.Lock()
         
-        self._block_states = [Status.EMPTY for _ in range(self.number_of_blocks)]
+        self._block_states = [Status.DOWNLOADED] * self.number_of_blocks if downloaded else [Status.EMPTY] * self.number_of_blocks
+
         self._block_states_lock = RWLock("_block_states_lock")
-        self._block_datas: list[bytes] = [b'' for _ in range(self.number_of_blocks)]
+        self._block_datas: list[bytes] = [b''] * self.number_of_blocks
         self._block_datas_lock = RWLock("_block_datas_lock")
         self._block_last_requested: list[float] = [time.time() for _ in range(self.number_of_blocks)]
         self._block_last_requested_lock = RWLock("_block_last_requested_lock")
@@ -37,7 +38,7 @@ class Piece:
         self._block_requested_by_lock = RWLock("_block_requested_by_lock")
         
         self._ready_queue = ready_queue
-        self._cur_status: Status = Status.EMPTY
+        self._cur_status: Status = self._state
         self._set_status_lock = threading.Lock()
 
     def _set_empty(self, i):

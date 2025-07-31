@@ -193,16 +193,16 @@ def main():
     # path = sys.argv[2]
 
     # torrent = r'.\torrents\music.torrent'
-    # path = r"./down"
+    # path = r"./downloads"
     
     # torrent = os.path.join('torrents', 'The_Jackbox_Party_Pack_3_MANY_PEERS_680MB.torrent')
     # torrent = os.path.join('torrents', 'REPO_300.torrent')
-    # torrent = os.path.join('torrents', 'music.torrent')
+    torrent = os.path.join('torrents', 'music.torrent')
     # torrent = os.path.join('torrents', '245_rut.torrent')
     # torrent = os.path.join('torrents', 'Photoshop_4gb.torrent')
-    torrent = os.path.join('torrents', 'Photoshop_2.58gb_rutr.torrent')
+    # torrent = os.path.join('torrents', 'Photoshop_2.58gb_rutr.torrent')
     # torrent = os.path.join('torrents', '1PieceManyManyFiles.torrent')
-    path = os.path.join('.', 'down')
+    path = os.path.join('.', 'downloads')
     b = Bittorrent()
     b.start_downloading(torrent, path)
 
