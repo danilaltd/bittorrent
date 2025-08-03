@@ -113,22 +113,22 @@ class Piece:
                     requested_by = self._block_requested_by[block_index]
                     if state == Status.EMPTY:
                         for prev_peer in requested_by:
-                            prev_peer.cancel_block(self._piece_index, block_index, skip_notify)
+                            prev_peer.am_cancel_block(self._piece_index, block_index, skip_notify)
                         requested_by.clear()
                         if peer:
                             requested_by.append(peer)
                     elif state == Status.DOWNLOADED:
                         for prev_peer in requested_by:
                             if prev_peer == peer:
-                                peer.got_block(self._piece_index, block_index)
+                                peer.am_got_block(self._piece_index, block_index, len(data))
                             else:
-                                prev_peer.cancel_block(self._piece_index, block_index, skip_notify)
+                                prev_peer.am_cancel_block(self._piece_index, block_index, skip_notify)
                         requested_by.clear()
                         if peer:
                             requested_by.append(peer)
                     elif state == Status.REQUESTED:
                         if peer and peer not in requested_by:
-                            peer.request_block(self._piece_index, block_index)
+                            peer.am_request_block(self._piece_index, block_index)
                             requested_by.append(peer)
                             
                 if state == Status.DOWNLOADED and self._cur_status == Status.DOWNLOADED:

@@ -88,10 +88,9 @@ class request:
 class pieceMessage:
     # piece: <len=0009+X><id=7><index><begin><block>
     message_ID = 7
-    def __init__(self, piece_index, piece_offset, block_length, data: bytes):
+    def __init__(self, piece_index, piece_offset, data: bytes):
         self.piece_index = piece_index
         self.piece_offset = piece_offset
-        self.block_length = block_length
         self.length = 9 + len(data)
         self.data = data
     def byteStringForPiece(self):

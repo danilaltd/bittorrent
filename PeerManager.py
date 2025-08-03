@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import BinaryIO
 from math import ceil
 import hashlib
+from itertools import islice
 
 
 MAX_CONNECTED_PEER = 50
@@ -35,6 +36,14 @@ DISABLE_FILE_WRITE = False
 
 def RoundUp(x):
     return ((x + 7) & (-8))
+
+def format_speed(speed: int) -> str:
+    if speed > 1024 * 1024:
+        return f"{speed/1024/1024:.1f} MB/s"
+    elif speed > 1024:
+        return f"{speed/1024:.1f} KB/s"
+    else:
+        return f"{speed:.1f} B/s"
 
 def log_error(msg, exc=None, flags = None, name = ''):
     if flags is None:
@@ -105,7 +114,9 @@ class PeerManager:
         self._base_path = Path(tracker_obj.torrent_obj.total_path)
         self._opened_files: dict[Path, BinaryIO] = {}
         self._load_files(tracker_obj.torrent_obj.piece_length, tracker_obj.torrent_obj.files)
-        downloaded_pieces = self.get_downloaded_pieces()
+        print("hashing...")
+        downloaded_pieces = self.get_downloaded_pieces()        
+        print("hashing done")
         self.piece_manager = PieceInfo(tracker_obj.torrent_obj, self._ready_queue, downloaded_pieces)
         self.torrent_completed = False
         self._optimistic_unchoke_peer: Peer = None
@@ -114,7 +125,15 @@ class PeerManager:
         self._rarest_piece_min_heap_lock = threading.Lock()
         self.need_update_pieces = True
         self.notify = notify
-        self.uploaded = 0
+        
+        self.downloaded_bytes = self._last_bytes_down = sum(self.piece_manager._get_piece_size(i) for i in downloaded_pieces)
+        self._last_bytes_up = 0 
+        self.uploaded_bytes = 0
+        self._last_update_time = time.time() - 1
+        self._download_speed = 0
+        self._upload_speed = 0
+        self._download_speed_history = []
+        self._upload_speed_history = []
         
         self._selector = selectors.DefaultSelector()
         
@@ -129,7 +148,6 @@ class PeerManager:
         
         self._receive_queue: queue.Queue[tuple[socket.socket, bytes]] = queue.Queue()
         self._peers_to_clear_queue: queue.Queue[Peer] = queue.Queue()
-        self._request_queue: queue.Queue[tuple[Peer, int, int, int]] = queue.Queue()
 
         self._periodic_piece_peers_thread = threading.Thread(target=self._periodic_piece_peers_update_enter)
         self._periodic_piece_peers_thread.start()
@@ -212,8 +230,8 @@ class PeerManager:
             current_time = time.time()
             if current_time - last_loop_time < 1:
                 continue
-            print(current_time - last_loop_time)
-            print(f"uploaded: {self.uploaded}")
+            print("peer_manager_loop")
+            
             last_loop_time = current_time
             try:
                 download_started = download_started or self.piece_manager.num_of_downloaded_pieces() + self.piece_manager.num_of_requested_pieces() >= 15
@@ -248,14 +266,13 @@ class PeerManager:
                     self.piece_manager.monitor_block_timeouts_safe(25)
                     last_monitor_block_timeouts = current_time
                     
-                self.piece_manager.print_progress_bar_safe(
+                self._print_progress_bar_internal(
                     print_matrix=True,
                     peers=self._get_peers_for_progress()
                 )
 
                 self.monitor_peers_keepalives()
                 
-                self.handle_requests()
                 self.write_into_files()
                 
                 if not peer_to_clear:
@@ -293,7 +310,6 @@ class PeerManager:
             if notify_data and peer.bit_field_sent:
                 self.send_data(peer, notify_data)
             if peer.initial_have and peer.initial_have_put_time and peer.bit_field_sent and peer._got_bit_field and current_time - peer.initial_have_put_time >= 5:
-                print(f"initial haves to {peer.ip_port}")
                 notify_data_peer_bytearray = bytearray()
                 while True:
                     try:
@@ -305,6 +321,21 @@ class PeerManager:
                     self.send_data(peer, bytes(notify_data_peer_bytearray))
                 peer.initial_have = None
                 peer.initial_have_put_time = None
+                
+            sum_len = 0
+            piece_messeges = bytearray()
+            while True:
+                res = peer.send_block()
+                if not res:
+                    break
+                piece_index, piece_offset, block_length = res
+                data = self.get_piece_data(piece_index, piece_offset, block_length)
+                piece_messeges.extend(pieceMessage(piece_index, piece_offset, data).byteStringForPiece())
+                sum_len += block_length
+            if sum_len:
+                self.send_data(peer, bytes(piece_messeges))
+                self.uploaded_bytes += sum_len
+            
             peer_needs, peer_can_send = peer.get_abilities(self.get_my_bit_field())
             if peer_needs:
                 if peer.peer_interested:
@@ -329,7 +360,7 @@ class PeerManager:
                 self.send_data(peer, keep_alive().byteStringForKeepAlive())
                 
     def update_rarest_piece_min_heap(self):
-        res = self.getRarestPieceMinHeap()
+        res = self.get_rarest_pieces()
         with self._rarest_piece_min_heap_lock:
             self._rarest_piece_min_heap = res
         self.notify()    
@@ -337,25 +368,29 @@ class PeerManager:
     def request_piece_update(self):
         self.need_update_pieces = True
         
-    def getRarestPieceMinHeap(self):
-        piece_listOfpeers = {}
-        for i in range(self.piece_manager.number_of_pieces):
-            piece_listOfpeers[i] = []
+    def get_rarest_pieces(self) -> list[tuple[int, list[Peer]]]:
+        piece_peers_is_req: list[int, list[Peer], bool] = []
         
         with self._connected_peers_lock.read_access:
             for index in range(self.piece_manager.number_of_pieces):
-                if not self.piece_manager.is_piece_complete(index):
-                    for peer in self._connected_peers:
-                        if peer.connected and peer.peer_choking == 0 and peer.is_bit_set_in_bit_field(index):
-                            piece_listOfpeers[index].append(peer)
-        filtered = {k: v for k, v in piece_listOfpeers.items() if len(v) > 0}
-        piece_listOfpeers = (sorted(filtered.items(), key = lambda kv:(len(kv[1]), kv[0]))) #Сортировка кусков по числу пиров, у которых они есть
-        result: list[tuple[int, list[Peer]]] = [] #Перемешивание в группах одинаковой редкости
-        for _, group in groupby(piece_listOfpeers, key=lambda kv: len(kv[1])):
-            group_list = list(group)
-            random.shuffle(group_list)
-            result.extend(group_list)
-        return result
+                is_req   = self.piece_manager.is_piece_requested(index)
+                is_emp   = self.piece_manager.is_piece_empty(index)
+                if not (is_req or is_emp):
+                    continue
+                peers = [
+                    peer
+                    for peer in self._connected_peers
+                    if peer.connected
+                    and peer.peer_choking == 0
+                    and peer.is_bit_set_in_bit_field(index)
+                ]
+                if peers:
+                    piece_peers_is_req.append((index, peers, is_req))
+        random.shuffle(piece_peers_is_req)
+        piece_peers_is_req.sort(key=lambda t: (0 if t[2] else 1, len(t[1])))
+
+        return [(idx, peers) for idx, peers, _ in piece_peers_is_req]
+
 
     def _update_peers(self):
         try:
@@ -384,6 +419,8 @@ class PeerManager:
                         break
                     try:
                         if peer.bad_peer or peer.connecting or peer.connected or (not peer.peer_can_send and not peer.peer_needs and peer._got_bit_field and self.bit_field_ready):
+                            if peer.ip == "5.251.172.248":
+                                print(peer.bad_peer, peer.connecting, peer.connected, (not peer.peer_can_send and not peer.peer_needs and peer._got_bit_field and self.bit_field_ready))
                             continue
                         self.launch_thread(peer)
                     except Exception as e:
@@ -607,37 +644,20 @@ class PeerManager:
                                     log_info(f"Received valid bitfield from {peer.ip_port}: length is {len(bitfield_data)}", flags = ['Reading'], name=f'{peer.ip_port}.log')
                                 elif message_ID_u == 6:  # Request
                                     piece_index, piece_offset, block_length = struct.unpack(">III", msg[5:])
-                                    # log_info(f"request {piece_index}:{piece_offset}:{block_length}", flags = ['Reading'], name=f'{peer.ip_port}.log')
-                                    self._request_queue.put((peer, piece_index, piece_offset, block_length))
+                                    peer.request_block(piece_index, piece_offset, block_length)
                                 elif message_ID_u == 7:  # Piece
                                     try:
-                                        piece_index_b = msg[5:9]
-                                        if not piece_index_b:
-                                            log_error(f"Invalid piece_index_b from {peer.ip_port}: {piece_index_b}", flags = ['Reading'], name=f'{peer.ip_port}.log')
-                                            continue
-                                        block_offset_b = msg[9:13]
-                                        if not block_offset_b:
-                                            log_error(f"Invalid piece_index_b from {peer.ip_port}: {block_offset_b}", flags = ['Reading'], name=f'{peer.ip_port}.log')
-                                            continue
                                         piece_index, block_offset = struct.unpack(">II", msg[5:13])
                                         block_index = block_offset // BLOCK_SIZE
                                         
                                         block_data = msg[13:]
-                                        if block_data is None:
-                                            log_error(f"Invalid piece {piece_index} from {peer.ip_port}: couldn't read data", flags = ['Reading'], name=f'{peer.ip_port}.log')
-                                            continue
-                                            
-
-                                        if self.piece_manager.update_block_status_safe(piece_index, block_index, Status.DOWNLOADED, block_data, requested_by=peer):
-                                            pass
-                                    except struct.error as e:
-                                        log_error(f"Error unpacking piece message from {peer.ip_port}", e, flags = ['Reading'], name=f'{peer.ip_port}.log')
-                                        continue
+                                        self.downloaded_bytes += len(block_data)
+                                        self.piece_manager.update_block_status_safe(piece_index, block_index, Status.DOWNLOADED, block_data, requested_by=peer)
                                     except Exception as e:
-                                        log_error(f"Error processing piece message from {peer.ip_port}", e)
-                                        continue
-                                elif message_ID_u == 8:  # Request
+                                        log_error(f"Error processing piece message from {peer.ip_port}", e, name=f'{peer.ip_port}.log')
+                                elif message_ID_u == 8:  # Cancel
                                     piece_index, piece_offset, block_length = struct.unpack(">III", msg[5:])
+                                    peer.cancel_block(piece_index, piece_offset, block_length)
                                     log_info(f"cancel {piece_index}:{piece_offset}:{block_length}", flags = ['Reading'], name=f'{peer.ip_port}.log')
                                 else:
                                     log_error(f"Unsupported message from {peer.ip_port}: message length: {message_length}, id: {message_ID_u}", flags = ['Reading'], name=f'{peer.ip_port}.log')
@@ -738,7 +758,7 @@ class PeerManager:
     def prefetch_next_blocks(self, piece_index, peer: Peer):
         """Request next blocks from the same piece following BitTorrent protocol"""
         sent = False
-        for block_index in self.piece_manager.get_empty_blocks(piece_index):
+        for block_index in islice(self.piece_manager.get_empty_blocks(piece_index), 64):
             try:
                 current_time = time.time()
                 self.send_data(peer, request(piece_index, block_index * BLOCK_SIZE, self.piece_manager.get_block_size(piece_index, block_index)).byteStringForRequest())
@@ -776,7 +796,7 @@ class PeerManager:
             self._last_optimistic_unchoke = current_time
 
     def send_cancel(self, peer: Peer, piece_index, block_index):
-        log_info(f"{peer.ip_port} send_cancel", name=f'{peer.ip_port}.log')
+        # log_info(f"{peer.ip_port} send_cancel", name=f'{peer.ip_port}.log')
         self.send_data(peer, cancel(piece_index, block_index * BLOCK_SIZE, self.piece_manager.get_block_size(piece_index, block_index)).byteStringForCancel())
 
     def send_choke(self, peer: Peer):
@@ -919,18 +939,6 @@ class PeerManager:
                     downloaded_pieces.add(piece_index)
                     
         return downloaded_pieces
-                    
-    def handle_requests(self):
-        i = 0
-        while True:
-            try:
-                peer, piece_index, piece_offset, block_length = self._request_queue.get_nowait()
-                data = self.get_piece_data(piece_index, piece_offset, block_length)
-                self.send_data(peer, pieceMessage(piece_index, piece_offset, block_length, data).byteStringForPiece())
-                i += 1
-            except queue.Empty:
-                break
-        self.uploaded += i
     
     def write_into_files(self):
         while True:
@@ -1004,3 +1012,177 @@ class PeerManager:
             result[result_segment_offset:result_segment_offset + read_len] = chunk
         
         return bytes(result)
+
+
+    def _print_progress_bar_internal(self, decimals = 1, print_matrix=False, peers=None):
+        """Internal method for printing progress bar without locks"""
+        out = ""
+        out += f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n'
+        out += self._progress_bar_string_internal(decimals, peers) 
+        
+        if peers is not None:
+            out += self._peer_stats_string_internal(peers)   
+        
+        # matrix_data = self._get_pieces_matrix_safe()
+        # if print_matrix and matrix_data:
+            # out += self._matrix_string_internal(matrix_data)
+        
+        try:
+            os.makedirs('logs', exist_ok=True)
+            with open(os.path.join('logs', "status.log"), 'w', encoding='utf-8') as f:
+                f.write(out)
+        except Exception as e:
+            log_error(f'error in status: {e}')
+
+    def _progress_bar_string_internal(self, decimals, peers):
+        """Internal method for progress bar string without locks"""
+        total = self.piece_manager._total_length
+        current_time = time.time()
+        time_diff = current_time - self._last_update_time
+        if time_diff >= 0.5:
+            downloaded_bytes = self.downloaded_bytes
+            uploaded_bytes = self.uploaded_bytes
+            bytes_down_diff = downloaded_bytes - self._last_bytes_down
+            bytes_up_diff = uploaded_bytes - self._last_bytes_up
+            
+            current_speed_down = bytes_down_diff / time_diff if time_diff > 0 else 0
+            current_speed_up = bytes_up_diff / time_diff if time_diff > 0 else 0
+            
+            self._download_speed_history.append(current_speed_down)
+            self._upload_speed_history.append(current_speed_up)
+            if len(self._download_speed_history) > 5:
+                self._download_speed_history.pop(0)
+            if len(self._upload_speed_history) > 5:
+                self._upload_speed_history.pop(0)
+                
+            
+            self._download_speed = sum(self._download_speed_history) / len(self._download_speed_history)
+            self._upload_speed = sum(self._upload_speed_history) / len(self._upload_speed_history)
+            
+            self._last_update_time = current_time
+            self._last_bytes_down = downloaded_bytes
+            self._last_bytes_up = uploaded_bytes
+
+        speed_str_down = format_speed(self._download_speed)
+        speed_str_up = format_speed(self._upload_speed)
+        eta_str = self.calculate_ETA()
+
+        if total > 0:
+            percent1 = f"{100 * (self._last_bytes_down / total):.{decimals}f}"
+            percent2 = f"{100 * (self.piece_manager.num_of_downloaded_pieces()/self.piece_manager.number_of_pieces):.{decimals}f}"
+        else:
+            percent1 = "0.0"
+            percent2 = "0.0"
+        
+        suffix = f"{self.piece_manager.num_of_downloaded_pieces()}/{self.piece_manager.num_of_requested_pieces()}/{self.piece_manager.num_of_empty_pieces()}/{self.piece_manager.number_of_pieces}"
+        
+        return f'{percent1} {percent2}% {suffix} down: {speed_str_down} up: {speed_str_up} ETA: {eta_str}\n'
+
+    def calculate_ETA(self) -> str:
+        if self._download_speed > 0:
+            eta_seconds = (self.piece_manager._total_length - self.downloaded_bytes) / self._download_speed
+            if eta_seconds > 3600:
+                return f"{eta_seconds/3600:.1f}h"
+            elif eta_seconds > 60:
+                return f"{eta_seconds/60:.1f}m"
+            else:
+                return  f"{eta_seconds:.0f}s"
+        else:
+            return "∞"
+    def _matrix_string_internal(self, matrix_data):
+        """Internal method for matrix string without locks"""
+        res = ''
+        matrix_width = 50
+        matrix = []
+        current_row = []
+        
+        for status in matrix_data:
+            current_row.append(status)
+            if len(current_row) == matrix_width:
+                matrix.append(''.join(current_row))
+                current_row = []
+        
+        if current_row:
+            matrix.append(''.join(current_row) + ' ' * (matrix_width - len(current_row)))
+        
+        res += f'\nWidth: {matrix_width}\n'
+        res += '\nBlock States:\n'
+        for row in matrix:
+            res += f"{row}\n"
+        return res
+        
+    def _peer_stats_string_internal(self, peers: list[Peer]):
+        """Internal method for peer stats string without locks"""
+        number_of_pieces = self.piece_manager.number_of_pieces
+        res = ''
+        try:
+            res += '\nPeers: %d' % len(peers)
+            
+            sorted_peers = sorted(peers, key=lambda peer: (not peer.connected, -peer.blocks_down))
+            
+            active_peers = 0
+            border = False
+            table = ''
+            if sorted_peers:
+                table += "Connected:\n"
+            current_time = time.time()
+            for peer in sorted_peers:
+                if not border and not peer.connected:
+                    table += "Not conected:\n"
+                    border = True
+                peer_id = f"{peer.ip}:{peer.port}"
+                # available = peer.avaliable_pieces(needed_pieces)
+                
+                if peer.connected:
+                    time_diff = current_time - peer._last_update_time
+                    if time_diff >= 0.5:
+                        downloaded_bytes = peer.downloaded_bytes
+                        uploaded_bytes = peer.uploaded_bytes
+                        bytes_down_diff = downloaded_bytes - peer._last_bytes_down
+                        bytes_up_diff = uploaded_bytes - peer._last_bytes_up
+                        
+                        current_speed_down = bytes_down_diff / time_diff if time_diff > 0 else 0
+                        current_speed_up = bytes_up_diff / time_diff if time_diff > 0 else 0
+                        
+                        peer._download_speed_history.append(current_speed_down)
+                        peer._upload_speed_history.append(current_speed_up)
+                        if len(peer._download_speed_history) > 5:
+                            peer._download_speed_history.pop(0)
+                        if len(peer._upload_speed_history) > 5:
+                            peer._upload_speed_history.pop(0)
+                            
+                        
+                        peer._download_speed = sum(peer._download_speed_history) / len(peer._download_speed_history)
+                        peer._upload_speed = sum(peer._upload_speed_history) / len(peer._upload_speed_history)
+                        
+                        peer._last_update_time = current_time
+                        peer._last_bytes_down = downloaded_bytes
+                        peer._last_bytes_up = uploaded_bytes
+
+                    speed_str = f'{format_speed(peer._download_speed)}/{format_speed(peer._upload_speed)}'
+                else:
+                    speed_str = '-/-'
+
+                requests_str = f"{peer.requests_sent_down}/{peer.requests_sent_up}"
+                pending_str = f"{peer.pending_requests_down}/{peer.pending_requests_up}"
+                canceled_str = f"{peer.canceled_requests_down}/{peer.canceled_requests_up}"
+                strings = []    
+                strings.append(f"{peer_id:<25}")
+                strings.append(f"Blocks: {peer.blocks_down:<6}")
+                strings.append(f"Requests: {requests_str:<14}")
+                strings.append(f"Pending: {pending_str:<14}")
+                strings.append(f"Canceled: {canceled_str:<14}")
+                strings.append(f"Bad: {'+' if peer.bad_peer else '-':<3}")
+                strings.append(f"Unchocked: {'+' if not peer.peer_choking else '-':<3}")
+                strings.append(f"Speed: {speed_str:<10}")
+                strings.append(f"Precent: {100 * (peer._have_pieces / number_of_pieces):<15.2f}")
+                table += ' '.join(strings) + '\n'
+        except Exception as e:
+            res += f'\n[Peer stats error: {e}]\n'
+            res += f'Traceback:\n{traceback.format_exc()}'
+            print(f'\n[Peer stats error: {e}]\nTraceback:\n{traceback.format_exc()}')
+
+        res += f' (active: {active_peers})\n'
+        res += table
+            
+        return res

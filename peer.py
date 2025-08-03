@@ -8,9 +8,10 @@ from rwlock import RWLock
 import traceback
 import threading
 import queue
+from collections import deque
 
 MAX_CONNECTION_ATTEMPTS = 3
-MAX_PENDING_REQUESTS = 64
+MAX_PENDING_REQUESTS = 128
 CONNECTION_TIMEOUT = 10
 INACTIVITY_TIMEOUT = 180
 
@@ -91,28 +92,39 @@ class Peer:
         self.peer_choking = True
         self.peer_interested = False
         self.connection_time = None
-        self._uploaded = 0
-        self._uploaded_lock = RWLock("_uploaded_lock")
-        self.blocks_recieved = 0
+        self.blocks_sent = 0
         self.connection_attempts = 0
         self.connected = False
         self.handshake_sent = False
         self.handshake_received = False
-        self._requests_sent = 0
-        self._requests_sent_lock = RWLock("_requests_sent_lock")
-        self._pending_requests = 0
-        self._pending_requests_lock = RWLock("_pending_requests_lock")
+        self.blocks_down = 0
+        self.blocks_up = 0
+        self.downloaded_bytes = 0
+        self.uploaded_bytes = 0
+        self._requests_sent_down = 0
+        self._requests_sent_down_lock = RWLock("_requests_sent_lock")
+        self._requests_sent_up = 0
+        self._requests_sent_up_lock = RWLock("_requests_sent_lock")
+        self._pending_requests_down = 0
+        self._pending_requests_down_lock = RWLock("_pending_requests_lock")
+        self._pending_requests_up = 0
+        self._pending_requests_up_lock = RWLock("_pending_requests_lock")
+        self._requested_queue: deque[tuple[int, int, int]] = deque()
+        self._requested_queue_lock = threading.Lock()
         self._last_request_time = time.time()
         self.bad_peer = False
         self.connecting = False
         self.peer_needs = True
         self.peer_can_send = True
-        self._last_update_time = time.time()
-        self._last_blocks_done = 0
-        self._last_bytes_done = 0
+        self._last_update_time = time.time() - 1
+        self._last_bytes_down = 0
+        self._last_bytes_up = 0
         self._download_speed = 0
-        self._speed_history = []
-        self.canceled_requests = 0
+        self._upload_speed = 0
+        self._download_speed_history = []
+        self._upload_speed_history = []
+        self.canceled_requests_down = 0
+        self.canceled_requests_up = 0
         self.requested_blocks_per_piece: list[set[int]] = [set() for _ in range(number_of_pieces)]
         self.requested_blocks_per_piece_lock = threading.Lock()
         self.initial_have: queue.Queue[int] | None = None
@@ -120,32 +132,42 @@ class Peer:
         self.send_cancel = send_cancel
         
     @property
-    def uploaded(self):
-        with self._uploaded_lock.read_access:
-            return self._uploaded
-    @uploaded.setter
-    def uploaded(self, value):
-        with self._uploaded_lock.write_access:
-            self._uploaded = value
+    def requests_sent_down(self):
+        with self._requests_sent_down_lock.read_access:
+            return self._requests_sent_down
+    def _inc_requests_sent_down(self):
+        with self._requests_sent_down_lock.write_access:
+            self._requests_sent_down += 1
+            
+    @property
+    def requests_sent_up(self):
+        with self._requests_sent_up_lock.read_access:
+            return self._requests_sent_up
+    def _inc_requests_sent_up(self):
+        with self._requests_sent_up_lock.write_access:
+            self._requests_sent_up += 1
 
     @property
-    def requests_sent(self):
-        with self._requests_sent_lock.read_access:
-            return self._requests_sent
-    def _inc_requests_sent(self):
-        with self._requests_sent_lock.write_access:
-            self._requests_sent += 1
+    def pending_requests_down(self):
+        with self._pending_requests_down_lock.read_access:
+            return self._pending_requests_down
+    def _inc_pending_requests_down(self):
+        with self._pending_requests_down_lock.write_access:
+            self._pending_requests_down += 1
+    def _dec_pending_requests_down(self):
+        with self._pending_requests_down_lock.write_access:
+            self._pending_requests_down -= 1
 
     @property
-    def pending_requests(self):
-        with self._pending_requests_lock.read_access:
-            return self._pending_requests
-    def _inc_pending_requests(self):
-        with self._pending_requests_lock.write_access:
-            self._pending_requests += 1
-    def _dec_pending_requests(self):
-        with self._pending_requests_lock.write_access:
-            self._pending_requests -= 1        
+    def pending_requests_up(self):
+        with self._pending_requests_up_lock.read_access:
+            return self._pending_requests_up
+    def _inc_pending_requests_up(self):
+        with self._pending_requests_up_lock.write_access:
+            self._pending_requests_up += 1
+    def _dec_pending_requests_up(self):
+        with self._pending_requests_up_lock.write_access:
+            self._pending_requests_up -= 1        
     
     @property
     def last_request_time(self):
@@ -160,7 +182,6 @@ class Peer:
         with self._bit_field_lock.write_access:
             self._bit_field = bitstring.BitArray(data)
             self._have_pieces = self._bit_field.count(1)
-            print(f"{self.ip_port} got bf {self._have_pieces}")
             self._bit_field_len = len(self._bit_field)
             self._got_bit_field = self._bit_field_len != 0
             
@@ -272,6 +293,7 @@ class Peer:
             except:
                 pass
         
+        self.connecting = False
         self.connected = False
         self.handshake_sent = False
         self.handshake_received = False
@@ -292,43 +314,71 @@ class Peer:
                 pass
 
     def peer_score(self):
-        if self.peer_choking or not self.connected or self.pending_requests > 1024 or self.pending_requests > max(32, (self._download_speed / (1024 * 1024)) * MAX_PENDING_REQUESTS):
+        if self.peer_choking or not self.connected or self.pending_requests_down > 1024 or self.pending_requests_down > max(32, (self._download_speed / (1024 * 1024)) * MAX_PENDING_REQUESTS):
             return float('-inf')
 
-        if self.requests_sent > 0:
-            if self.blocks_recieved == self.requests_sent - self.canceled_requests:
+        if self.requests_sent_down > 0:
+            if self.blocks_down == self.requests_sent_down - self.canceled_requests_down:
                 score = 1
             else:
-                score = (self.blocks_recieved / (self.requests_sent - self.canceled_requests)) * (self._download_speed / (20 * 1024 * 1024))
+                score = (self.blocks_down / (self.requests_sent_down - self.canceled_requests_down)) * (self._download_speed / (20 * 1024 * 1024))
         else:
             score = 0.99
         
         return score
     
-    def cancel_block(self, piece_index: int, block_index: int, skip_notify: bool):
-        if not skip_notify:
-            with self.requested_blocks_per_piece_lock:
-                self.requested_blocks_per_piece[piece_index].discard(block_index)
-        self.send_cancel(self, piece_index, block_index)
-        self._dec_pending_requests()
-        self.canceled_requests += 1
-    
-    def got_block(self, piece_index: int, block_index: int):
-        with self.requested_blocks_per_piece_lock:
-            self.requested_blocks_per_piece[piece_index].discard(block_index)
-        self._dec_pending_requests()
-        self.blocks_recieved += 1
-
-    def request_block(self, piece_index: int, block_index: int):
+    def am_request_block(self, piece_index: int, block_index: int):
         with self.requested_blocks_per_piece_lock:
             self.requested_blocks_per_piece[piece_index].add(block_index)
         
-        self._inc_pending_requests()
-        self._inc_requests_sent()
-
-
-
-
-            
-
-
+        self._inc_pending_requests_down()
+        self._inc_requests_sent_down()
+    
+    def am_cancel_block(self, piece_index: int, block_index: int, skip_notify: bool):
+        if not skip_notify:
+            with self.requested_blocks_per_piece_lock:
+                if block_index in self.requested_blocks_per_piece[piece_index]:
+                    self.requested_blocks_per_piece[piece_index].remove(block_index)
+                    self.send_cancel(self, piece_index, block_index)
+                else:
+                    log_error(f"cancel block that not in list {piece_index}:{block_index}")
+                    return
+        self._dec_pending_requests_down()
+        self.canceled_requests_down += 1
+    
+    def am_got_block(self, piece_index: int, block_index: int, block_length: int):
+        with self.requested_blocks_per_piece_lock:
+            if block_index in self.requested_blocks_per_piece[piece_index]:
+                self.requested_blocks_per_piece[piece_index].remove(block_index)
+            else:
+                log_error(f"got block that not in list {piece_index}:{block_index}")
+        self._dec_pending_requests_down()
+        self.blocks_down += 1
+        self.downloaded_bytes += block_length
+        
+    def request_block(self, piece_index: int, block_index: int, block_length: int):
+        with self._requested_queue_lock:
+            self._requested_queue.append((piece_index, block_index, block_length))
+        
+        self._inc_pending_requests_up()
+        self._inc_requests_sent_up()
+    
+    def cancel_block(self, piece_index: int, block_index: int, block_length: int):
+        try:
+            with self._requested_queue_lock:
+                self._requested_queue.remove((piece_index, block_index, block_length))
+        except:
+            return
+        self._dec_pending_requests_up()
+        self.canceled_requests_up += 1
+    
+    def send_block(self) -> tuple[int, int, int] | None:
+        try:
+            with self._requested_queue_lock:
+                res = self._requested_queue.popleft()
+        except:
+            return None
+        self._dec_pending_requests_up()
+        self.blocks_up += 1
+        self.uploaded_bytes += res[2]
+        return res

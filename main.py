@@ -118,7 +118,7 @@ class Bittorrent:
         # while not self.peer_manager.piece_manager.all_piece_complete_safe():
         while True:
             try:
-                print("loop")
+                print("main_loop")
                 # self._update_stats()
                 # self.peer_manager.update_optimistic_unchoke()
                 self._download_rarest_first()
@@ -144,26 +144,23 @@ class Bittorrent:
                     if self.min_heap_updated:
                         self.min_heap_updated = False
                         break
-                    # best_peer = peers[0]
-                    # scored_peers = [(peer.peer_score(), peer) for peer in peers]
-                    # best_score, best_peer = max(scored_peers, key=lambda x: x[0], default=(NEG_INF, None))
                     best_peer = max(peers, key=lambda p: p.peer_score(), default=None)
-                    # print()
                     if best_peer and best_peer.peer_score() > NEG_INF:
                         i += self.peer_manager.prefetch_next_blocks(piece_i, best_peer)
-                    else:
-                        time.sleep(0.5)
+                    # else:
+                        # time.sleep(0.5)
             if not sent or i == 0:
-                Logger.info("No peers available. Retrying...")
+                # Logger.info("No peers available. Retrying...")
                 time.sleep(1)
         except Exception as e:
             log_error(f"Error in _download_rarest_first: {e}")
 
     def _update_stats(self):
         try:
-            downloaded = self.peer_manager.piece_manager.num_of_downloaded_pieces()
-            uploaded = sum(peer.uploaded for peer in self.peer_manager.get_connected_peers_copy())
-            self.tracker.update_stats(downloaded * BLOCK_SIZE, uploaded)
+            pass
+            # downloaded = self.peer_manager.piece_manager.num_of_downloaded_pieces()
+            # uploaded = sum(peer.uploaded for peer in self.peer_manager.get_connected_peers_copy())
+            # self.tracker.update_stats(downloaded * BLOCK_SIZE, uploaded)
         except Exception as e:
             log_error(f"Error updating stats: {e}")
 
@@ -199,12 +196,14 @@ def main():
     # torrent = os.path.join('torrents', 'REPO_300.torrent')
     # torrent = os.path.join('torrents', 'music.torrent')
     # torrent = os.path.join('torrents', 'manyLeeches5.torrent')
-    torrent = os.path.join('torrents', 'Andr.torrent')
+    # torrent = os.path.join('torrents', 'Andr.torrent')
+    # torrent = os.path.join('torrents', 'Madison.torrent')
     # torrent = os.path.join('torrents', 'ninja.torrent')
     # torrent = os.path.join('torrents', 'FoxLake.torrent')
     # torrent = os.path.join('torrents', '245_rut.torrent')
     # torrent = os.path.join('torrents', 'Photoshop_4gb.torrent')
     # torrent = os.path.join('torrents', 'Photoshop_2.58gb_rutr.torrent')
+    torrent = os.path.join('torrents', 'People_Playground.torrent')
     # torrent = os.path.join('torrents', '1PieceManyManyFiles.torrent')
     path = os.path.join('.', 'downloads')
     b = Bittorrent()

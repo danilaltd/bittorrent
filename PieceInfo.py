@@ -75,13 +75,8 @@ class PieceInfo:
         
         self._pieces_statuses = [Status.EMPTY] * self.number_of_pieces
         
-        self.downloaded_blocks = self._last_blocks_done = sum(self._get_block_len(i) for i in downloaded_pieces)
-        self._totalBlocks = 0
         self._ready_queue: queue.Queue[tuple[int, list[bytes]]] = ready_queue
         self._generate_pieces(downloaded_pieces)
-        self._last_update_time = time.time()
-        self._download_speed = 0
-        self._speed_history = []
         
         self.running = True
 
@@ -94,193 +89,10 @@ class PieceInfo:
                 piece_length = self._piece_length
             downloaded = i in downloaded_pieces
             piece = Piece(i, piece_length, self._ready_queue, downloaded)
-            self._totalBlocks += self._get_block_len(i)
             self._pieces.append(piece)
         
     def write_into_files_enter(self):
         self.write_into_files()
-        
-    def _print_progress_bar_internal(self, decimals, print_matrix, peers):
-        """Internal method for printing progress bar without locks"""
-        # Calculate download speed
-        out = ""
-        out += f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n'
-        out += self._progress_bar_string_internal(decimals, peers) 
-        
-        if peers is not None:
-            out += self._peer_stats_string_internal(peers)   
-        
-        # matrix_data = self._get_pieces_matrix_safe()
-        # if print_matrix and matrix_data:
-            # out += self._matrix_string_internal(matrix_data)
-        
-        try:
-            os.makedirs('logs', exist_ok=True)
-            with open(os.path.join('logs', "status.log"), 'w', encoding='utf-8') as f:
-                f.write(out)
-        except Exception as e:
-            log_error(f'error in status: {e}')
-
-    def _progress_bar_string_internal(self, decimals, peers):
-        """Internal method for progress bar string without locks"""
-        total = self._totalBlocks
-        current_time = time.time()
-        time_diff = current_time - self._last_update_time
-        if time_diff >= 0.5:
-            blocks_done = self.downloaded_blocks
-            bytes_diff = (blocks_done - self._last_blocks_done) * BLOCK_SIZE
-            
-            current_speed = bytes_diff / time_diff if time_diff > 0 else 0
-            
-            self._speed_history.append(current_speed)
-            if len(self._speed_history) > 5:
-                self._speed_history.pop(0)
-            
-            self._download_speed = sum(self._speed_history) / len(self._speed_history)
-            
-            self._last_update_time = current_time
-            self._last_blocks_done = blocks_done
-
-        # Format speed
-        if self._download_speed > 1024 * 1024:
-            speed_str = f"{self._download_speed/1024/1024:.1f} MB/s"
-        elif self._download_speed > 1024:
-            speed_str = f"{self._download_speed/1024:.1f} KB/s"
-        else:
-            speed_str = f"{self._download_speed:.1f} B/s"
-
-        # Calculate ETA
-        if self._download_speed > 0:
-            remaining_bytes = (total - self._last_blocks_done) * BLOCK_SIZE
-            eta_seconds = remaining_bytes / self._download_speed
-            if eta_seconds > 3600:
-                eta_str = f"{eta_seconds/3600:.1f}h"
-            elif eta_seconds > 60:
-                eta_str = f"{eta_seconds/60:.1f}m"
-            else:
-                eta_str = f"{eta_seconds:.0f}s"
-        else:
-            eta_str = "∞"
-
-        if total > 0:
-            percent1 = f"{100 * (self._last_blocks_done / total):.{decimals}f}"
-            percent2 = f"{100 * (self.num_of_downloaded_pieces()/self.number_of_pieces):.{decimals}f}"
-        else:
-            percent1 = "0.0"
-            percent2 = "0.0"
-        
-        suffix = f"{self.num_of_downloaded_pieces()}/{self.num_of_requested_pieces()}/{self.num_of_empty_pieces()}/{self.number_of_pieces}"
-        
-        return f'{percent1} {percent2}% {suffix} {speed_str} ETA: {eta_str}\n'
-
-    def _matrix_string_internal(self, matrix_data):
-        """Internal method for matrix string without locks"""
-        res = ''
-        matrix_width = 50
-        matrix = []
-        current_row = []
-        
-        for status in matrix_data:
-            current_row.append(status)
-            if len(current_row) == matrix_width:
-                matrix.append(''.join(current_row))
-                current_row = []
-        
-        if current_row:
-            matrix.append(''.join(current_row) + ' ' * (matrix_width - len(current_row)))
-        
-        res += f'\nWidth: {matrix_width}\n'
-        res += '\nBlock States:\n'
-        for row in matrix:
-            res += f"{row}\n"
-        return res
-        
-    def _peer_stats_string_internal(self, peers: list[Peer]):
-        """Internal method for peer stats string without locks"""
-        number_of_pieces = self.number_of_pieces
-        res = ''
-        try:
-            res += '\nPeers: %d' % len(peers)
-            # needed_pieces_count = self.number_of_pieces - self.num_of_downloaded_pieces()
-            # needed_pieces = self.empty_pieces.copy()
-            
-            sorted_peers = sorted(peers, key=lambda peer: (not peer.connected, -peer.blocks_recieved))
-            
-            active_peers = 0
-            border = False
-            table = ''
-            if sorted_peers:
-                table += "Connected:\n"
-            for peer in sorted_peers:
-                if not border and not peer.connected:
-                    table += "Not conected:\n"
-                    border = True
-                peer_id = f"{peer.ip}:{peer.port}"
-                # available = peer.avaliable_pieces(needed_pieces)
-                
-                if peer.connected:
-                    current_time = time.time()
-                    time_diff = current_time - peer._last_update_time
-                    if time_diff >= 0.5 or not len(peer._speed_history):
-                        # if peers:
-                            # blocks_done = peers[0].blocks_recieved
-                        # else:
-                        blocks_done = peer.blocks_recieved
-                        current_bytes = blocks_done * BLOCK_SIZE
-                        bytes_diff = current_bytes - peer._last_bytes_done
-                        
-                        current_speed = bytes_diff / time_diff if time_diff > 0 else 0
-                        
-                        peer._speed_history.append(current_speed)
-                        if len(peer._speed_history) > 5:
-                            peer._speed_history.pop(0)
-                    
-                        peer._download_speed = sum(peer._speed_history) / len(peer._speed_history)
-                        
-                        peer._last_update_time = current_time
-                        peer._last_blocks_done = blocks_done
-                        peer._last_bytes_done = current_bytes
-                    
-                    speed = peer._download_speed
-                    
-                    if speed > 1024 * 1024:
-                        speed_str = f"{speed/1024/1024:.1f} MB/s"
-                    elif speed > 1024:
-                        speed_str = f"{speed/1024:.1f} KB/s"
-                    else:
-                        speed_str = f"{speed:.1f} B/s"
-                        
-                else:
-                    speed_str = "-"
-                    
-                
-                
-                # active = available > 0
-                # if active:
-                    # active_peers += 1
-                strings = []    
-                # sign = '+' if active else '-'
-                # strings.append(f"{sign:<2}")
-                strings.append(f"{peer_id:<25}")
-                # strings.append(f"Pieces: {available:<4}")
-                strings.append(f"Blocks: {peer.blocks_recieved:<6}")
-                strings.append(f"Connections: {peer.requests_sent:<7}")
-                strings.append(f"Pending: {peer.pending_requests:<7}")
-                strings.append(f"Canceled: {peer.canceled_requests:<7}")
-                strings.append(f"Bad: {'+' if peer.bad_peer else '-':<3}")
-                strings.append(f"Unchocked: {'+' if not peer.peer_choking else '-':<3}")
-                strings.append(f"Speed: {speed_str:<10}")
-                strings.append(f"Precent: {100 * (peer._have_pieces / number_of_pieces):<15.2f}")
-                table += ' '.join(strings) + '\n'
-        except Exception as e:
-            res += f'\n[Peer stats error: {e}]\n'
-            res += f'Traceback:\n{traceback.format_exc()}'
-            print(f'\n[Peer stats error: {e}]\nTraceback:\n{traceback.format_exc()}')
-
-        res += f' (active: {active_peers})\n'
-        res += table
-            
-        return res
 
     def _get_pieces_matrix_safe(self):
         matrix = []
@@ -296,6 +108,7 @@ class PieceInfo:
     def monitor_block_timeouts_safe(self, timeout: int):
         for piece_index, piece in enumerate(self._pieces):
             self.set_blocks_empty(piece_index, piece.get_blocks_to_reset(timeout))
+    
     def set_blocks_empty(self, piece_index, bad_blocks, skip_notify: bool = False):    
         if bad_blocks:
             cur_time = time.time()
@@ -361,17 +174,8 @@ class PieceInfo:
     def all_piece_complete_safe(self):
         return self.num_of_downloaded_pieces() == self.number_of_pieces
 
-    def print_progress_bar_safe(self, decimals=1, print_matrix=False, peers=None):
-        try:
-            self._print_progress_bar_internal(decimals, print_matrix, peers)
-        except Exception as e:
-            log_error(f"print_progress_bar_safe: {e}" )
-
     def update_block_status_safe(self, piece_index: int, block_index, state: Status, data=None, last_requested=None, requested_by: Peer = None, skip_notify: bool = False):
         try:
-            if state == Status.DOWNLOADED:
-                self.downloaded_blocks += 1
-
             prev, cur = self._pieces[piece_index].set_block_state(block_index, state, data, last_requested, requested_by, skip_notify)
             self._fix_nums(prev, cur, piece_index)
             return True

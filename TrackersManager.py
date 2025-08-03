@@ -126,9 +126,11 @@ class TrackersManager:
         # self.peers.add(('176.195.240.222',   47950))
         
         
-        self.peers.add(('83.37.145.154',   45680)) #andr
-        self.peers.add(('109.110.74.209',   14648)) #andr
-        # self.peers.add(('221.162.198.176',   44555)) #ninja
+        # self.peers.add(('83.37.145.154',   45680)) #andr
+        # self.peers.add(('109.110.74.209',   14648)) #andr
+        # self.peers.add(('5.251.172.248',   14706)) #andr
+
+        # self.peers.add(('116.234.27.248',   64026)) #ninja
 
 
     def _connect_to_trackers(self):
