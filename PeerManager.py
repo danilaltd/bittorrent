@@ -938,9 +938,8 @@ class PeerManager:
         opened_files: dict[Path, BinaryIO] = {}
         downloaded_pieces: set[int] = set()
         for piece_index, blocks in sorted(self._files.items()):
-            sha1_calc = hashlib.sha1()
             total_read = 0
-
+            data = b''
             for entry in blocks:
                 full_path: Path = self._base_path.joinpath(*entry['path'])
                 fd = opened_files.get(full_path)
@@ -951,15 +950,13 @@ class PeerManager:
                     else:
                         break
                 fd.seek(entry['file_offset'])
-                data = fd.read(entry['length'])
-                if len(data) < entry['length']:
+                chunk = fd.read(entry['length'])
+                if len(chunk) < entry['length']:
                     break
-                sha1_calc.update(data)
-                total_read += len(data)
+                data += chunk
+                total_read += len(chunk)
             else:
-                expected = self._SHA1s[piece_index].hex()
-                actual = sha1_calc.hexdigest()
-                if actual == expected:
+                if self.verify_data(piece_index, data):
                     self.set_bit_in_bit_field(piece_index)
                     downloaded_pieces.add(piece_index)
         self.seeding = self.all_bits_set_in_bit_field()
@@ -972,26 +969,35 @@ class PeerManager:
             except queue.Empty:
                 break
             data = b"".join(blocks)
-            self.set_bit_in_bit_field(idx)
-            self._pieces_to_notify.put(idx)
-            if not DISABLE_FILE_WRITE:
-                for entry in self._files.get(idx, []):
-                    full_path = self._base_path.joinpath(*entry['path'])
-                    fd = self._opened_files.get(full_path)
-                    if fd is None:
-                        mode = 'r+b' if full_path.exists() else 'wb'
-                        fd = full_path.open(mode)
-                        self._opened_files[full_path] = fd
+            if self.verify_data(idx, data):
+                self.set_bit_in_bit_field(idx)
+                self._pieces_to_notify.put(idx)
+                if not DISABLE_FILE_WRITE:
+                    for entry in self._files.get(idx, []):
+                        full_path = self._base_path.joinpath(*entry['path'])
+                        fd = self._opened_files.get(full_path)
+                        if fd is None:
+                            mode = 'r+b' if full_path.exists() else 'wb'
+                            fd = full_path.open(mode)
+                            self._opened_files[full_path] = fd
 
-                    start = entry['piece_offset']
-                    end = start + entry['length']
-                    chunk = data[start:end]
-                    fd.seek(entry['file_offset'])
-                    fd.write(chunk)
-                    fd.flush()
+                        start = entry['piece_offset']
+                        end = start + entry['length']
+                        chunk = data[start:end]
+                        fd.seek(entry['file_offset'])
+                        fd.write(chunk)
+                        fd.flush()
+            else:
+                log_error(f"downloaded wrong piece: {idx}")
+                self.piece_manager.set_blocks_empty(idx, set(range(1, self.piece_manager._get_block_len(idx))), True)
         self.seeding = self.all_bits_set_in_bit_field()
                 # print(i)
-        
+       
+    def verify_data(self, idx: int, data: bytes) -> bool:
+        expected = self._SHA1s[idx].hex()
+        actual = hashlib.sha1(data).hexdigest()
+        return actual == expected
+    
     def close_files(self):
         for fd in self._opened_files.values():
             fd.flush()
@@ -1114,6 +1120,7 @@ class PeerManager:
                 return  f"{eta_seconds:.0f}s"
         else:
             return "∞"
+    
     def _matrix_string_internal(self, matrix_data):
         """Internal method for matrix string without locks"""
         res = ''

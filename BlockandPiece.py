@@ -30,7 +30,7 @@ class Piece:
         self._block_states = [Status.DOWNLOADED] * self.number_of_blocks if downloaded else [Status.EMPTY] * self.number_of_blocks
 
         self._block_states_lock = RWLock("_block_states_lock")
-        self._block_datas: list[bytes] = [b''] * self.number_of_blocks
+        self._block_datas: list[bytes] | None = None
         self._block_datas_lock = RWLock("_block_datas_lock")
         self._block_last_requested: list[float] = [time.time() for _ in range(self.number_of_blocks)]
         self._block_last_requested_lock = RWLock("_block_last_requested_lock")
@@ -103,6 +103,8 @@ class Piece:
                     self._reset_empty(block_index)
                     self._reset_requested(block_index)
                 if data:
+                    if not self._block_datas:
+                        self._block_datas = [b''] * self.number_of_blocks
                     with self._block_datas_lock.write_access:
                         self._block_datas[block_index] = data
                 if last_requested:
@@ -133,6 +135,7 @@ class Piece:
                             
                 if state == Status.DOWNLOADED and self._cur_status == Status.DOWNLOADED:
                     self._ready_queue.put((self._piece_index, self._block_datas))
+                    self._block_datas = None
                     
                 return prev_state, cur_state
         
