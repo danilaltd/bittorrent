@@ -61,7 +61,8 @@ class Torrent:
     def request_peers_parameters(self):
         bencoded_info = bencode(self.contents["info"])
         self.info_hash = hashlib.sha1(bencoded_info).digest()
-        self.peer_id = self.generate_peer_id()
+        self.peer_id = b'[\xfa\xc8U\xb9C\xcf\n\x0eg\xf4t\x06\xff\xb8|\x1b\xec2\xb4'
+        # self.peer_id = self.generate_peer_id()
         self.left = self.total_length
         self.port = 6881
 

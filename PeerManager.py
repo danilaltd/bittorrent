@@ -13,7 +13,6 @@ import os
 from datetime import datetime
 from rwlock import RWLock
 import traceback
-from itertools import groupby
 import selectors
 import queue
 from pathlib import Path
@@ -33,6 +32,7 @@ OPTIMISTIC_UNCHOKE_INTERVAL = 30
 KEEPALIVE_INTERVAL = 60
 DEFAULT_MONITOR_BLOCK_TIMEOUTS = 5
 DISABLE_FILE_WRITE = False
+HOST_SERVER = False
 
 def RoundUp(x):
     return ((x + 7) & (-8))
@@ -109,7 +109,7 @@ class PeerManager:
         self._my_bitfield = bitstring.BitArray(RoundUp(number_of_pieces))
         self.bit_field_ready = False
         self._bit_field_lock = RWLock("")
-        self._bit_field_len = len(self._my_bitfield)
+        self._bit_field_len = number_of_pieces
         self._files = None
         self._base_path = Path(tracker_obj.torrent_obj.total_path)
         self._opened_files: dict[Path, BinaryIO] = {}
@@ -134,7 +134,7 @@ class PeerManager:
         self._upload_speed = 0
         self._download_speed_history = []
         self._upload_speed_history = []
-        
+        self.seeding = False
         self._selector = selectors.DefaultSelector()
         
         self._send_bufs: dict[socket.socket, bytearray] = {}
@@ -149,23 +149,26 @@ class PeerManager:
         self._receive_queue: queue.Queue[tuple[socket.socket, bytes]] = queue.Queue()
         self._peers_to_clear_queue: queue.Queue[Peer] = queue.Queue()
 
-        self._periodic_piece_peers_thread = threading.Thread(target=self._periodic_piece_peers_update_enter)
+        if HOST_SERVER:
+            self._start_listen_socket(tracker_obj.torrent_obj.port)
+        
+        self._periodic_piece_peers_thread = threading.Thread(target=self._periodic_piece_peers_update)
         self._periodic_piece_peers_thread.start()
         
-        self._sockets_thread = threading.Thread(target=self._socket_worker_loop_enter)
+        self._sockets_thread = threading.Thread(target=self._socket_worker_loop)
         self._sockets_thread.start()
         
-        self._reader_thread = threading.Thread(target=self.read_continously_from_sock_enter)
+        self._reader_thread = threading.Thread(target=self.read_continously_from_sock)
         self._reader_thread.start()
     
-    def _periodic_piece_peers_update_enter(self):
-        self._periodic_piece_peers_update()
-        
-    def _socket_worker_loop_enter(self):
-        self._socket_worker_loop()
-        
-    def read_continously_from_sock_enter(self):
-        self.read_continously_from_sock()
+    def _start_listen_socket(self, port):
+        listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listen_sock.bind(('0.0.0.0', port))
+        listen_sock.listen()
+        listen_sock.setblocking(False)
+        self._selector.register(listen_sock, selectors.EVENT_READ)
+        self.listen_sock = listen_sock
     
     def _is_peer_in_peers(self, peer: Peer):
         with self._peers_lock.read_access:
@@ -455,25 +458,31 @@ class PeerManager:
                 continue
             for key, mask in events:
                 sock = key.fileobj
-                try:
-                    if mask & selectors.EVENT_READ:
-                        self._handle_read(sock)
-                except OSError as e:
-                    ip_port = self._unregister_peer(sock)
-                    log_error(f"read: closed {ip_port} {e}")
-                    continue
-                except Exception as e:
-                    log_error(f"_socket_worker_loop_read: {e} {type(e)}, args: {e.args}, repr: {repr(e)}")
-                
-                try:
-                    if mask & selectors.EVENT_WRITE:
-                        self._handle_write(sock)
-                except OSError as e:
-                    ip_port = self._unregister_peer(sock)
-                    log_error(f"write: closed {ip_port} {e}")
-                    continue
-                except Exception as e:
-                    log_error(f"_socket_worker_loop_write: {e} {type(e)}, args: {e.args}, repr: {repr(e)}") #  \n{traceback.format_exc()}
+                if HOST_SERVER and sock is self.listen_sock:
+                    try:
+                        self._handle_listen_sock()
+                    except Exception as e:
+                        log_error(f"_socket_worker_loop_listen: {e} {type(e)}, args: {e.args}, repr: {repr(e)}")
+                else:
+                    try:
+                        if mask & selectors.EVENT_READ:
+                            self._handle_read(sock)
+                    except OSError as e:
+                        ip_port = self._unregister_peer(sock)
+                        log_error(f"read: closed {ip_port} {e}")
+                        continue
+                    except Exception as e:
+                        log_error(f"_socket_worker_loop_read: {e} {type(e)}, args: {e.args}, repr: {repr(e)}")
+                    
+                    try:
+                        if mask & selectors.EVENT_WRITE:
+                            self._handle_write(sock)
+                    except OSError as e:
+                        ip_port = self._unregister_peer(sock)
+                        log_error(f"write: closed {ip_port} {e}")
+                        continue
+                    except Exception as e:
+                        log_error(f"_socket_worker_loop_write: {e} {type(e)}, args: {e.args}, repr: {repr(e)}") #  \n{traceback.format_exc()}
             
     def _handle_write(self, sock: socket.socket):
         """Send as much data from send_buf and send_queue as socket allows."""
@@ -546,6 +555,18 @@ class PeerManager:
         # remove parsed bytes
         if offset > 0:
             del recv_buf[:offset]
+
+    def _handle_listen_sock(self):
+        sock, addr = self.listen_sock.accept()
+        log_info(f"{addr} wants to connect")
+        try:
+            if not self._is_peer_in_peers_ip_port(addr):
+                self._add_peer_ip_port(addr)
+                peerObj = Peer(addr, self.piece_manager.number_of_pieces, self.send_cancel)
+                self._add_peer(peerObj)
+                self.launch_thread(peerObj, sock)
+        except Exception as e:
+            log_error(f"Error _handle_listen_sock, \nTraceback:\n{traceback.format_exc()}", e)
 
     def getMessage(self) -> tuple[socket.socket, bytes] | None:
         try:
@@ -674,8 +695,8 @@ class PeerManager:
             log_error(f"Fatal error in read thread. \n{traceback.format_exc()}", e, flags = ['Reading'])
 
         
-    def launch_thread(self, peer: Peer):
-        p = threading.Thread(target=self.MultiThreadedConnection, args=(peer,))
+    def launch_thread(self, peer: Peer, sock = None):
+        p = threading.Thread(target=self.MultiThreadedConnection, args=(peer, sock))
         p.daemon = True
         p.start()
     
@@ -716,7 +737,7 @@ class PeerManager:
             return ip_port
         return None
     
-    def MultiThreadedConnection(self, peer:Peer):
+    def MultiThreadedConnection(self, peer:Peer, sock = None):
         # if peer.ip != '5.79.98.162' and peer.ip != '90.240.225.228':
             # return
         log_info(f"MultiThreadedConnection in {peer.ip}")
@@ -731,7 +752,7 @@ class PeerManager:
                 return
                 
             
-            if not peer.connect_to_peer():
+            if not peer.connect_to_peer(sock):
                 peer.bad_peer = True
                 peer.connecting = False
                 return
@@ -862,6 +883,10 @@ class PeerManager:
             return True
         return False
     
+    def all_bits_set_in_bit_field(self) -> bool:
+        with self._bit_field_lock.read_access:
+            return all(bit == 1 for bit in self._my_bitfield[:self._bit_field_len])
+    
     def is_bit_set_in_bit_field(self, piece_index) -> bool:
         if self._bit_field_len <= piece_index:
             return False
@@ -937,7 +962,7 @@ class PeerManager:
                 if actual == expected:
                     self.set_bit_in_bit_field(piece_index)
                     downloaded_pieces.add(piece_index)
-                    
+        self.seeding = self.all_bits_set_in_bit_field()
         return downloaded_pieces
     
     def write_into_files(self):
@@ -964,7 +989,7 @@ class PeerManager:
                     fd.seek(entry['file_offset'])
                     fd.write(chunk)
                     fd.flush()
-
+        self.seeding = self.all_bits_set_in_bit_field()
                 # print(i)
         
     def close_files(self):

@@ -207,7 +207,9 @@ class Peer:
         self.peer_can_send = (peer_bf & ~client_bf).any(True)
         return self.peer_needs, self.peer_can_send
 
-    def connect_to_peer(self):
+    def connect_to_peer(self, sock: socket.socket | None = None):
+        needs_to_connect = not bool(sock)
+        
         if not (0 < self.port < 65536):
             log_info(f"Invalid port number {self.port} for {self.ip}")
             return False
@@ -226,20 +228,22 @@ class Peer:
         try:
             if validIPAddress(self.ip) == "IPv6":
                 log_info(f"{self.ip} is v6")
-                sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+                if needs_to_connect:
+                    sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
                 ip_port = (self.ip, self.port, 0, 0)
             else:
                 log_info(f"{self.ip} is v4")
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                if needs_to_connect:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 * 1024 * 1024) 
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16 * 1024 * 1024)  
                 ip_port = (self.ip, self.port)
 
-            log_info(f"Attempting connection to {ip_port}")
-            sock.settimeout(CONNECTION_TIMEOUT)
-                
-            sock.connect(ip_port)
+            if needs_to_connect:
+                log_info(f"Attempting connection to {ip_port}")
+                sock.settimeout(CONNECTION_TIMEOUT)
+                sock.connect(ip_port)
             
             try:
                 sock.getpeername()
@@ -247,7 +251,7 @@ class Peer:
                 log_info(f"Connection verification failed for {ip_port}: {e}")
                 self.close2(sock)
                 return False
-            
+                
             sock.setblocking(False)
             current_time = time.time()
             self.sock = sock

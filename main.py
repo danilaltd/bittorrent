@@ -104,7 +104,6 @@ class Bittorrent:
                 self._download_loop()
             except Exception as e:
                 log_error(f"self._download_loop(): {e}")
-            self._notify_trackers_complete()
         finally:
             self._finalize()
 
@@ -112,23 +111,19 @@ class Bittorrent:
         self.tracker.start_periodic_updates()
 
     def _download_loop(self):
-        # Start monitor thread
-        # Start progress thread
         
-        # while not self.peer_manager.piece_manager.all_piece_complete_safe():
-        while True:
+        while not self.peer_manager.seeding:
             try:
                 print("main_loop")
-                # self._update_stats()
-                # self.peer_manager.update_optimistic_unchoke()
+                self._update_stats()
                 self._download_rarest_first()
             except Exception as e:
                 log_error(f"Error in download loop: {e}")
                 time.sleep(1)  # Небольшая пауза перед повторной попыткой
-        
-        # Wait for progress thread to finish
-        # if self._progress_thread and self._progress_thread.is_alive():
-            # self._progress_thread.join()
+        print("seeding now")
+        self._notify_trackers_complete()
+        while True:
+            time.sleep(5)        
 
     def set_updated(self):
         self.min_heap_updated = True
@@ -157,10 +152,9 @@ class Bittorrent:
 
     def _update_stats(self):
         try:
-            pass
-            # downloaded = self.peer_manager.piece_manager.num_of_downloaded_pieces()
-            # uploaded = sum(peer.uploaded for peer in self.peer_manager.get_connected_peers_copy())
-            # self.tracker.update_stats(downloaded * BLOCK_SIZE, uploaded)
+            downloaded = self.peer_manager.downloaded_bytes
+            uploaded = self.peer_manager.uploaded_bytes
+            self.tracker.update_stats(downloaded, uploaded)
         except Exception as e:
             log_error(f"Error updating stats: {e}")
 
@@ -202,8 +196,8 @@ def main():
     # torrent = os.path.join('torrents', 'FoxLake.torrent')
     # torrent = os.path.join('torrents', '245_rut.torrent')
     # torrent = os.path.join('torrents', 'Photoshop_4gb.torrent')
-    # torrent = os.path.join('torrents', 'Photoshop_2.58gb_rutr.torrent')
-    torrent = os.path.join('torrents', 'People_Playground.torrent')
+    torrent = os.path.join('torrents', 'novichok.torrent')
+    # torrent = os.path.join('torrents', 'People_Playground.torrent')
     # torrent = os.path.join('torrents', '1PieceManyManyFiles.torrent')
     path = os.path.join('.', 'downloads')
     b = Bittorrent()

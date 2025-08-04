@@ -196,7 +196,7 @@ class TrackersManager:
                     
                     http_trackers_to_remove = []
                     for tracker in self.http_trackers:
-                        if current_time - tracker.last_transmition >= TRACKER_RECIEVE_TIMEOUT:
+                        if tracker.announce_fault:
                             if tracker.attempts >= TRACKER_MAX_ATTEMPTS_TO_RECIEVE:
                                 http_trackers_to_remove.append(tracker)
                             else:
@@ -230,17 +230,22 @@ class TrackersManager:
                 raise Exception(f"parse_response: len(data) < 8, len(data): {len(data)}")
             transaction_id, = struct.unpack(">i", data[4:8])
             try:
-                peers = self._get_tracker_by_transaction_id(transaction_id).parce_response(data)
+                tracker = self._get_tracker_by_transaction_id(transaction_id)
+                peers = tracker.parce_response(data)
                 with self.peers_lock:
                     self.peers.update(peers)
+                    log_info(f"got {len(peers)} from {tracker.url}")
             except Exception as e:
                 log_error(f"_parse_response_udp: {e}")
                 
     def _announcee_http(self, tracker: httpTracker, event: HTTPEvent | None = None):
         try:
             peers = tracker.announce(self.downloaded, self.left, self.uploaded, self.port, event)
+            log_info(f"{tracker.url}: {tracker.announce_interval} s")
+            
             with self.peers_lock:
                 self.peers.update(peers)
+                log_info(f"got {len(peers)} from {tracker.url}")
         except Exception as e:
             log_error(f"_announce_http: {e}")
                 

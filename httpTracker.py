@@ -4,6 +4,18 @@ import time
 from enum import Enum
 from bcoding import bdecode
 import requests
+import os
+from datetime import datetime
+
+def log_error(msg, exc=None):
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        if exc is not None:
+            log_entry = f'[{timestamp}][Error] {msg}: {exc}\n'
+        else:
+            log_entry = f'[{timestamp}][Error] {msg}\n'
+            
+        with open(os.path.join('logs', "bittorrent.log"), 'a', encoding='utf-8') as f:
+            f.write(log_entry)
 
 class HTTPEvent(Enum):
     started = 'started'
@@ -31,11 +43,11 @@ class httpTracker:
         payload = {
             'info_hash': self.info_hash, 
             'peer_id': self.peer_id, 
-            'port': self.port, 
-            'uploaded': uploaded, 
-            'downloaded': downloaded, 
-            'left': left, 
-            'numwant': 200, 
+            'port': str(self.port), 
+            'uploaded': str(uploaded), 
+            'downloaded': str(downloaded), 
+            'left': str(left), 
+            'numwant': str(200), 
         }
         
         if event is not None:
@@ -54,6 +66,8 @@ class httpTracker:
             except Exception as e:
                 raise Exception(f"bdecode error: {e}; contrnt: {answer_tracker.content}; status_code: {answer_tracker.status_code}")
             res: list[tuple[str, int]] = set()
+            if 'failure reason' in response:
+                log_error(f"continue before exception but {self.url} failure reason: {response['failure reason']}")
             if 'interval' in response and 'peers' in response:
                 announce_interval = response['interval']
                 peers = response['peers']
