@@ -32,6 +32,8 @@ class udpTracker:
         self.pending = False
         self._notified_start = False
         self.initialised = False
+        self.need_to_notify = False
+        self.last_left = None
     
     def bytes_for_connecting(self):
         connection_id = struct.pack('>q', 0x41727101980)
@@ -57,6 +59,8 @@ class udpTracker:
             if not self._notified_start:
                 self._notified_start = True
                 event = UDPEvent.started
+            elif ((self.last_left is None or self.last_left != 0) and left == 0):
+                event = UDPEvent.completed
             else:
                 event = UDPEvent.none
         event_bytes = struct.pack('>i', event.value)
@@ -70,6 +74,7 @@ class udpTracker:
         self.pending = True
         self.last_transmition = time.time()
         self.last_announce = time.time()
+        self.need_to_notify = False
         return res
     
     def bytes_for_scraping(self, info_hashes: list[bytes]):

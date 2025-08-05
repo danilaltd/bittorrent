@@ -33,6 +33,8 @@ class httpTracker:
         self.attempts = 0
         self.announce_fault = False
         self.last_transmition = time.time()
+        self.need_to_notify = False
+        self.last_left = None
         
     def announce(self, downloaded: int, left: int, uploaded: int, port: int, event: HTTPEvent | None = None) -> list[tuple[str, int]]:
         self.last_transmition = time.time()
@@ -50,11 +52,17 @@ class httpTracker:
             'numwant': str(200), 
         }
         
+        if event is None:
+            if not self._notified_start:
+                event = HTTPEvent.started
+                self._notified_start = True
+            elif ((self.last_left is None or self.last_left != 0) and left == 0):
+                event = HTTPEvent.completed
+                
+
         if event is not None:
             payload['event'] = event.value
-        elif not self._notified_start:
-            payload['event'] = HTTPEvent.started.value
-            self._notified_start = True
+        self.last_left = left
 
         try:
             try:
@@ -94,6 +102,7 @@ class httpTracker:
             self.attempts = 0
             self.announce_fault = False
             self.announce_interval = announce_interval
+            self.need_to_notify = False
             return res
         except Exception as e:
             raise Exception(f"http_request: {e}")

@@ -118,7 +118,6 @@ class PeerManager:
         downloaded_pieces = self.get_downloaded_pieces()        
         print("hashing done")
         self.piece_manager = PieceInfo(tracker_obj.torrent_obj, self._ready_queue, downloaded_pieces)
-        self.torrent_completed = False
         self._optimistic_unchoke_peer: Peer = None
         self._running = True
         self._rarest_piece_min_heap: list[tuple[int, list[Peer]]] = []

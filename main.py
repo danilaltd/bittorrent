@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 import os
 import yappi
+import traceback
 from logger import Logger, print_lock_stats
 
 NEG_INF = float('-inf')
@@ -95,7 +96,7 @@ class Bittorrent:
         self._clear_logs_directory()
         self.tracker = TrackersManager(torrent, path)
         self.peer_manager = PeerManager(self.tracker, self.set_updated)
-        
+        self.tracker.init_downloaded = self.peer_manager.downloaded_bytes
         Logger.info(f"Total torrent length: {self.tracker.torrent_obj.total_length}")
 
         try:
@@ -103,7 +104,7 @@ class Bittorrent:
             try:
                 self._download_loop()
             except Exception as e:
-                log_error(f"self._download_loop(): {e}")
+                log_error(f"self._download_loop(): {e} \nTraceback:\n{traceback.format_exc()}")
         finally:
             self._finalize()
 
@@ -115,14 +116,16 @@ class Bittorrent:
         while not self.peer_manager.seeding:
             try:
                 print("main_loop")
-                self._update_stats()
                 self._download_rarest_first()
+                self._update_stats()
             except Exception as e:
                 log_error(f"Error in download loop: {e}")
-                time.sleep(1)  # Небольшая пауза перед повторной попыткой
+                time.sleep(1)
         print("seeding now")
-        self._notify_trackers_complete()
+        Logger.info("Torrent Complete")
+        Logger.info(f"Total length: {self.tracker.torrent_obj.total_length}")
         while True:
+            self._update_stats()
             time.sleep(5)        
 
     def set_updated(self):
@@ -154,18 +157,11 @@ class Bittorrent:
         try:
             downloaded = self.peer_manager.downloaded_bytes
             uploaded = self.peer_manager.uploaded_bytes
-            self.tracker.update_stats(downloaded, uploaded)
+            left = max(0, self.tracker.torrent_obj.total_length - downloaded)
+
+            self.tracker.update_stats(downloaded, uploaded, left)
         except Exception as e:
             log_error(f"Error updating stats: {e}")
-
-    def _notify_trackers_complete(self):
-        Logger.info("Torrent Complete")
-        Logger.info(f"Total length: {self.tracker.torrent_obj.total_length}")
-        self.peer_manager.torrent_completed = True
-        self.tracker.notify_trackers_complete()
-        # self.peer_manager.piece_manager.print_progress_bar_safe(
-        #     f"Completed {self.peer_manager.piece_manager.num_of_downloaded_pieces()}/{self.peer_manager.piece_manager.num_of_requested_pieces()}/{self.peer_manager.piece_manager.num_of_empty_pieces()}/{self.peer_manager.piece_manager.number_of_pieces}"
-        # )
 
     def _finalize(self):
         self.running = False
@@ -188,14 +184,14 @@ def main():
     
     # torrent = os.path.join('torrents', 'The_Jackbox_Party_Pack_3_MANY_PEERS_680MB.torrent')
     # torrent = os.path.join('torrents', 'REPO_300.torrent')
-    # torrent = os.path.join('torrents', 'music.torrent')
+    torrent = os.path.join('torrents', 'music.torrent')
     # torrent = os.path.join('torrents', 'manyLeeches5.torrent')
     # torrent = os.path.join('torrents', 'Andr.torrent')
     # torrent = os.path.join('torrents', 'Madison.torrent')
     # torrent = os.path.join('torrents', 'ninja.torrent')
     # torrent = os.path.join('torrents', 'FoxLake.torrent')
     # torrent = os.path.join('torrents', '245_rut.torrent')
-    torrent = os.path.join('torrents', 'Photoshop_4gb.torrent')
+    # torrent = os.path.join('torrents', 'Photoshop_4gb.torrent')
     # torrent = os.path.join('torrents', 'novichok.torrent')
     # torrent = os.path.join('torrents', 'People_Playground.torrent')
     # torrent = os.path.join('torrents', '1PieceManyManyFiles.torrent')

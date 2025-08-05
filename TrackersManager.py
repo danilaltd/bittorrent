@@ -54,8 +54,9 @@ class TrackersManager:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(('0.0.0.0', 0))
         self.sock.setblocking(False)
-        
+        self.need_to_notify = False
         self._connect_to_trackers()
+        self.init_downloaded: int = None
         
         #music
         # self.peers.add(('5.79.98.162', 53916))
@@ -181,13 +182,14 @@ class TrackersManager:
                     udp_trackers_to_remove = []
                     udp_initialised = True
                     for tracker in self.udp_trackers:
-                        udp_initialised |= tracker.initialised
+                        udp_initialised &= tracker.initialised
+                        tracker.need_to_notify = self.need_to_notify
                         if tracker.pending and current_time - tracker.last_transmition >= TRACKER_RECIEVE_TIMEOUT:
                             if tracker.attempts >= TRACKER_MAX_ATTEMPTS_TO_RECIEVE:
                                 udp_trackers_to_remove.append(tracker)
                             else:
                                 self.sock.sendto(tracker.resend(), tracker.sock_addr)
-                        elif current_time - tracker.last_announce >= tracker.announce_interval:
+                        elif tracker.initialised and (tracker.need_to_notify or current_time - tracker.last_announce >= tracker.announce_interval):
                             self.sock.sendto(tracker.bytes_for_announce(self.downloaded, self.left, self.uploaded, self.port), tracker.sock_addr)
                     self.udp_initialised = udp_initialised
                             
@@ -196,12 +198,13 @@ class TrackersManager:
                     
                     http_trackers_to_remove = []
                     for tracker in self.http_trackers:
+                        tracker.need_to_notify = self.need_to_notify
                         if tracker.announce_fault:
                             if tracker.attempts >= TRACKER_MAX_ATTEMPTS_TO_RECIEVE:
                                 http_trackers_to_remove.append(tracker)
                             else:
                                 self._announcee_http(tracker)
-                        elif current_time - tracker.last_transmition >= tracker.announce_interval:
+                        elif tracker.need_to_notify or current_time - tracker.last_transmition >= tracker.announce_interval:
                             self._announcee_http(tracker)
 
                     for tracker in http_trackers_to_remove:
@@ -212,7 +215,6 @@ class TrackersManager:
                 time.sleep(1)
             except Exception as e:
                 log_error(f"Error in _periodic_update loop: {e} \nTraceback:\n{traceback.format_exc()}")
-                
 
     def _get_tracker_by_transaction_id(self, transaction_id: int) -> udpTracker:
         for tracker in self.udp_trackers:
@@ -251,14 +253,14 @@ class TrackersManager:
                 
     def start_periodic_updates(self):
         self.trackers_update_thread = threading.Thread(target=self._periodic_update)
-        # self.trackers_update_thread.daemon = True
         self.trackers_update_thread.start()
 
     def stop_periodic_updates(self):
         self.running = False
         for tracker in self.udp_trackers:
             try:
-                self.sock.sendto(tracker.bytes_for_announce(self.downloaded, self.left, self.uploaded, self.port, UDPEvent.stopped), tracker.sock_addr)
+                if tracker.initialised:
+                    self.sock.sendto(tracker.bytes_for_announce(self.downloaded, self.left, self.uploaded, self.port, UDPEvent.stopped), tracker.sock_addr)
             except:
                 pass
         for tracker in self.http_trackers:
@@ -267,14 +269,9 @@ class TrackersManager:
             except:
                 pass
             
-    def notify_trackers_complete(self):
-        for tracker in self.udp_trackers:
-            self.sock.sendto(tracker.bytes_for_announce(self.downloaded, self.left, self.uploaded, self.port, UDPEvent.completed), tracker.sock_addr)
-        for tracker in self.http_trackers:
-            self._announcee_http(tracker, HTTPEvent.completed)
-
-    def update_stats(self, downloaded, uploaded):
-        """Update download/upload statistics"""
-        self.downloaded = downloaded
+    def update_stats(self, downloaded: int, uploaded: int, left: int):
+        self.downloaded = downloaded - self.init_downloaded
         self.uploaded = uploaded
-        self.left = max(0, self.torrent_obj.total_length - downloaded)
+        if left == 0 and self.left != 0:
+            self.need_to_notify = True
+        self.left = left
