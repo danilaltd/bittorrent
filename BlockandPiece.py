@@ -31,11 +31,11 @@ class Piece:
         self._blocks_downloaded_lock = threading.Lock()
         
         self._block_datas: list[bytes] | None = None
-        self._block_datas_lock = RWLock("_block_datas_lock")
+        self._block_datas_lock = RWLock()
         self._block_last_requested: list[float] = [time.time() for _ in range(self.number_of_blocks)]
-        self._block_last_requested_lock = RWLock("_block_last_requested_lock")
+        self._block_last_requested_lock = RWLock()
         self._block_requested_by: list[set[Peer]] = [[] for _ in range(self.number_of_blocks)]
-        self._block_requested_by_lock = RWLock("_block_requested_by_lock")
+        self._block_requested_by_lock = RWLock()
         
         self._ready_queue = ready_queue
         self._cur_status: Status = self._state

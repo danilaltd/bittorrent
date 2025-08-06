@@ -32,7 +32,7 @@ class udpTracker:
         self.pending = False
         self._notified_start = False
         self.initialised = False
-        self.need_to_notify = False
+        self._need_to_notify = False
         self.last_left = None
     
     def bytes_for_connecting(self):
@@ -74,7 +74,7 @@ class udpTracker:
         self.pending = True
         self.last_transmition = time.time()
         self.last_announce = time.time()
-        self.need_to_notify = False
+        self._need_to_notify = False
         return res
     
     def bytes_for_scraping(self, info_hashes: list[bytes]):

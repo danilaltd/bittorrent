@@ -1,4 +1,3 @@
-from torrent import Torrent
 from BlockandPiece import BLOCK_SIZE, Status
 from TrackersManager import TrackersManager
 from peer import Peer, MAX_CONNECTION_ATTEMPTS
@@ -98,17 +97,17 @@ class PeerManager:
     def __init__(self, tracker_obj: TrackersManager, notify):
         self._tracker_obj: TrackersManager = tracker_obj
         self._peers: list[Peer] = []
-        self._peers_lock = RWLock("_peers_lock")
+        self._peers_lock = RWLock()
         self._peers_ip_port: list[tuple[str, str]] = []
-        self._peers_ip_port_lock = RWLock("_peers_ip_port_lock")
+        self._peers_ip_port_lock = RWLock()
         self._connected_peers: list[Peer] = []
-        self._connected_peers_lock = RWLock("_connected_peers_lock")
+        self._connected_peers_lock = RWLock()
         self._ready_queue: queue.Queue[tuple[int, list[bytes]]] = queue.Queue()
         number_of_pieces = ceil(tracker_obj.torrent_obj.total_length / tracker_obj.torrent_obj.piece_length)
         self._SHA1s: list[bytes] = self._getSHA1(number_of_pieces, tracker_obj.torrent_obj.pieces)
         self._my_bitfield = bitstring.BitArray(RoundUp(number_of_pieces))
         self.bit_field_ready = False
-        self._bit_field_lock = RWLock("")
+        self._bit_field_lock = RWLock()
         self._bit_field_len = number_of_pieces
         self._files = None
         self._base_path = Path(tracker_obj.torrent_obj.total_path)
@@ -414,8 +413,7 @@ class PeerManager:
 
     def _update_peers(self):
         try:
-            with self._tracker_obj.peers_lock:
-                peers_copy = self._tracker_obj.peers.copy()
+            peers_copy = self._tracker_obj.get_peers_copy()
             log_info(f"Got {len(peers_copy)} peers")
             for peer_ip_port in peers_copy:
                 if not self._is_peer_in_peers_ip_port(peer_ip_port):

@@ -81,7 +81,7 @@ class Peer:
         self._bit_field = bitstring.BitArray(RoundUp(number_of_pieces))
         self._bit_field_len = 0
         self._have_pieces = 0
-        self._bit_field_lock = RWLock("_bit_field_lock")
+        self._bit_field_lock = RWLock()
         self._got_bit_field = False
         self.ip_port: tuple[str, int] = ip_port
         self.ip = ip_port[0]
@@ -102,13 +102,13 @@ class Peer:
         self.downloaded_bytes = 0
         self.uploaded_bytes = 0
         self._requests_sent_down = 0
-        self._requests_sent_down_lock = RWLock("_requests_sent_lock")
+        self._requests_sent_down_lock = RWLock()
         self._requests_sent_up = 0
-        self._requests_sent_up_lock = RWLock("_requests_sent_lock")
+        self._requests_sent_up_lock = RWLock()
         self._pending_requests_down = 0
-        self._pending_requests_down_lock = RWLock("_pending_requests_lock")
+        self._pending_requests_down_lock = RWLock()
         self._pending_requests_up = 0
-        self._pending_requests_up_lock = RWLock("_pending_requests_lock")
+        self._pending_requests_up_lock = RWLock()
         self._requested_queue: deque[tuple[int, int, int]] = deque()
         self._requested_queue_lock = threading.Lock()
         self._last_request_time = time.time()

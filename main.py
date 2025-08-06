@@ -1,3 +1,4 @@
+from torrent import Torrent
 from peer import Peer
 from TrackersManager import TrackersManager
 from PeerManager import PeerManager
@@ -8,7 +9,7 @@ from datetime import datetime
 import os
 import yappi
 import traceback
-from logger import Logger, print_lock_stats
+from logger import Logger
 from collections import deque
 
 NEG_INF = float('-inf')
@@ -93,11 +94,12 @@ class Bittorrent:
         os.makedirs('logs', exist_ok=True)
         os.makedirs(os.path.join('logs', "peermanager"), exist_ok=True)
     
-    def start_downloading(self, torrent, path):
+    def start_downloading(self, torrent_path: str, download_path: str):
         self._clear_logs_directory()
-        self.tracker = TrackersManager(torrent, path)
+        torrent_obj = Torrent(torrent_path, download_path) 
+        self.tracker = TrackersManager(torrent_obj)
         self.peer_manager = PeerManager(self.tracker, self.set_updated)
-        self.tracker.init_downloaded = self.peer_manager.downloaded_bytes
+        self.tracker.downloaded_on_init = self.peer_manager.downloaded_bytes
         Logger.info(f"Total torrent length: {self.tracker.torrent_obj.total_length}")
 
         try:
@@ -186,10 +188,6 @@ class Bittorrent:
         self.tracker.stop_periodic_updates()
         self.peer_manager.exitPeerThreads()
             
-    def print_lock_statistics(self):
-        """Выводит статистику использования locks для всего приложения"""
-        print_lock_stats()
-
 def main():
     # if len(sys.argv) != 3:
         # print("Usage: python main.py <torrent_file> <download_path>")
@@ -204,7 +202,7 @@ def main():
     # torrent = os.path.join('torrents', 'REPO_300.torrent')
     # torrent = os.path.join('torrents', 'music.torrent')
     # torrent = os.path.join('torrents', 'manyLeeches5.torrent')
-    torrent = os.path.join('torrents', 'Andr.torrent')
+    torrent_path = os.path.join('torrents', 'Andr.torrent')
     # torrent = os.path.join('torrents', 'Madison.torrent')
     # torrent = os.path.join('torrents', 'ninja.torrent')
     # torrent = os.path.join('torrents', 'FoxLake.torrent')
@@ -214,9 +212,9 @@ def main():
     # torrent = os.path.join('torrents', 'People_Playground.torrent')
     # torrent = os.path.join('torrents', '1PieceManyManyFiles.torrent')
     # torrent = os.path.join('torrents', 'Photoshop_2.58gb_rutr.torrent')
-    path = os.path.join('.', 'downloads')
+    download_path = os.path.join('.', 'downloads')
     b = Bittorrent()
-    b.start_downloading(torrent, path)
+    b.start_downloading(torrent_path, download_path)
 
 if __name__ == "__main__":
     yappi.set_clock_type("cpu")

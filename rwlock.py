@@ -4,9 +4,8 @@ class RWLock:
     """ Non-reentrant write-preferring rwlock. """
     DEBUG = 0
 
-    def __init__(self, name):
+    def __init__(self):
         self.lock = threading.Lock()
-        self.name = name
         self.active_writer_lock = threading.Lock()
         # The total number of writers including the active writer and
         # those blocking on active_writer_lock or readers_finished_cond.
@@ -22,7 +21,7 @@ class RWLock:
         self.writers_finished_cond = threading.Condition(self.lock)
 
         class _ReadAccess:
-            def __init__(self, rwlock):
+            def __init__(self, rwlock: RWLock):
                 self.rwlock = rwlock
             def __enter__(self):
                 self.rwlock.acquire_read()
@@ -38,7 +37,7 @@ class RWLock:
         self.read_access = _ReadAccess(self)
 
         class _WriteAccess:
-            def __init__(self, rwlock):
+            def __init__(self, rwlock: RWLock):
                 self.rwlock = rwlock
             def __enter__(self):
                 self.rwlock.acquire_write()
@@ -58,12 +57,11 @@ class RWLock:
             self.active_writer = None
 
     def acquire_read(self):
-        # with timed_lock(self.lock, self.name + "_read"):
         with self.lock:
             if self.DEBUG:
                 me = threading.currentThread()
-                assert me not in self.active_readers, f'{self.name}: This thread has already acquired read access and this lock isn\'t reader-reentrant!'
-                assert me != self.active_writer, f'{self.name}: This thread already has write access, release that before acquiring read access!'
+                assert me not in self.active_readers, f'This thread has already acquired read access and this lock isn\'t reader-reentrant!'
+                assert me != self.active_writer, f'This thread already has write access, release that before acquiring read access!'
                 self.active_readers.add(me)
             if self.writer_count:
                 self.waiting_reader_count += 1
@@ -78,7 +76,6 @@ class RWLock:
             self.active_reader_count += 1
 
     def release_read(self):
-        # with timed_lock(self.lock, self.name + "_read"):
         with self.lock:
             if self.DEBUG:
                 me = threading.currentThread()
@@ -90,7 +87,6 @@ class RWLock:
                 self.readers_finished_cond.notifyAll()
 
     def acquire_write(self):
-        # with timed_lock(self.lock, self.name + "_write"):
         with self.lock:
             if self.DEBUG:
                 me = threading.currentThread()
@@ -109,7 +105,6 @@ class RWLock:
     def release_write(self):
         if not self.DEBUG:
             self.active_writer_lock.release()
-        # with timed_lock(self.lock, self.name + "_read"):
         with self.lock:
             if self.DEBUG:
                 me = threading.currentThread()
@@ -122,6 +117,5 @@ class RWLock:
                 self.writers_finished_cond.notifyAll()
 
     def get_state(self):
-        # with timed_lock(self.lock, self.name):
         with self.lock:
             return (self.writer_count, self.waiting_reader_count, self.active_reader_count)
