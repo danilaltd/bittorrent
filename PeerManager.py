@@ -20,7 +20,7 @@ from typing import BinaryIO
 from math import ceil
 import hashlib
 from itertools import islice
-
+from collections import deque
 
 MAX_CONNECTED_PEER = 50
 MIN_PEER_UPDATE_INTERVAL = 3
@@ -120,8 +120,8 @@ class PeerManager:
         self.piece_manager = PieceInfo(tracker_obj.torrent_obj, self._ready_queue, downloaded_pieces)
         self._optimistic_unchoke_peer: Peer = None
         self._running = True
-        self._rarest_piece_min_heap: list[tuple[int, list[Peer]]] = []
-        self._rarest_piece_min_heap_lock = threading.Lock()
+        self._rarest_pieces: list[tuple[int, list[Peer]]] = []
+        self._rarest_pieces_lock = threading.Lock()
         self.need_update_pieces = True
         self.notify = notify
         
@@ -244,7 +244,7 @@ class PeerManager:
                 )
                 if update_pieces:
                     self.need_update_pieces = False
-                    self.update_rarest_piece_min_heap()
+                    self.update_rarest_pieces()
                     last_piece_update = current_time
                     
                     
@@ -274,7 +274,6 @@ class PeerManager:
                 )
 
                 self.monitor_peers_keepalives()
-                
                 self.write_into_files()
                 
                 if not peer_to_clear:
@@ -361,17 +360,17 @@ class PeerManager:
             if current_time - peer.last_request_time >= KEEPALIVE_INTERVAL:
                 self.send_data(peer, keep_alive().byteStringForKeepAlive())
                 
-    def update_rarest_piece_min_heap(self):
+    def update_rarest_pieces(self):
         res = self.get_rarest_pieces()
-        with self._rarest_piece_min_heap_lock:
-            self._rarest_piece_min_heap = res
+        with self._rarest_pieces_lock:
+            self._rarest_pieces = res
         self.notify()    
         
     def request_piece_update(self):
         self.need_update_pieces = True
         
     def get_rarest_pieces(self) -> list[tuple[int, list[Peer]]]:
-        piece_peers_is_req: list[int, list[Peer], bool] = []
+        piece_peers_is_req: list[tuple[int, list[Peer], bool]] = []
         
         with self._connected_peers_lock.read_access:
             for index in range(self.piece_manager.number_of_pieces):
@@ -390,8 +389,27 @@ class PeerManager:
                     piece_peers_is_req.append((index, peers, is_req))
         random.shuffle(piece_peers_is_req)
         piece_peers_is_req.sort(key=lambda t: (0 if t[2] else 1, len(t[1])))
+        rarest_pieces = [(idx, peers) for idx, peers, _ in piece_peers_is_req]
 
-        return [(idx, peers) for idx, peers, _ in piece_peers_is_req]
+        grouped: deque[deque[tuple[int, list[Peer]]]] = deque()
+        current_group = deque()
+        for piece_index, peers in rarest_pieces:
+            if not current_group:
+                current_group.append((piece_index, peers))
+                continue
+
+            _, last_peers = current_group[-1]
+            if peers == last_peers:
+                current_group.append((piece_index, peers))
+            else:
+                grouped.append(deque(current_group))
+                current_group.clear()
+                current_group.append((piece_index, peers))
+
+        if current_group:
+            grouped.append(deque(current_group))
+        
+        return grouped
 
 
     def _update_peers(self):
@@ -447,7 +465,6 @@ class PeerManager:
     def _socket_worker_loop(self):
         while self._running:
             # print(f"{self._get_connected_peers_count()} {len(self._selector.get_map())}")
-            # print(f"rec: {self._receive_queue.qsize()}")
             try:
                 if not self._selector.get_map():
                     time.sleep(0.05)
@@ -498,7 +515,6 @@ class PeerManager:
                     send_buf.extend(chunk)
                 except queue.Empty:
                     break
-            # print(f"{ip_port}: send {i}/{send_queue.qsize()}")
             if send_buf:
                 send_view = memoryview(send_buf)
 
@@ -862,9 +878,9 @@ class PeerManager:
 
         return bitfield, zeroed_bits
     
-    def get_rarest_piece_min_heap_copy(self):
-        with self._rarest_piece_min_heap_lock:
-            return self._rarest_piece_min_heap.copy()
+    def get_rarest_piece_rarest_pieces_copy(self):
+        with self._rarest_pieces_lock:
+            return self._rarest_pieces.copy()
 
     def get_connected_peers_copy(self):
         with self._connected_peers_lock.read_access:
@@ -962,7 +978,8 @@ class PeerManager:
         return downloaded_pieces
     
     def write_into_files(self):
-        while True:
+        i = 0
+        while i != 50:
             try:
                 idx, blocks = self._ready_queue.get_nowait()
             except queue.Empty:
@@ -989,6 +1006,7 @@ class PeerManager:
             else:
                 log_error(f"downloaded wrong piece: {idx}")
                 self.piece_manager.set_blocks_empty(idx, set(range(1, self.piece_manager._get_block_len(idx))), True)
+            i += 1
         self.seeding = self.all_bits_set_in_bit_field()
                 # print(i)
        
@@ -1106,7 +1124,7 @@ class PeerManager:
         
         suffix = f"{self.piece_manager.num_of_downloaded_pieces()}/{self.piece_manager.num_of_requested_pieces()}/{self.piece_manager.num_of_empty_pieces()}/{self.piece_manager.number_of_pieces}"
         
-        return f'{percent1} {percent2}% {suffix} down: {speed_str_down} up: {speed_str_up} ETA: {eta_str}\n'
+        return f'{percent1} {percent2}% {suffix} down: {speed_str_down} up: {speed_str_up} ETA: {eta_str}\n\n'
 
     def calculate_ETA(self) -> str:
         if self._download_speed > 0:
@@ -1146,6 +1164,9 @@ class PeerManager:
         """Internal method for peer stats string without locks"""
         number_of_pieces = self.piece_manager.number_of_pieces
         res = ''
+        res += f"recieve queue: {self._receive_queue.qsize()}\n"
+        res += f"ready queue: {self._ready_queue.qsize()}\n"
+        
         try:
             res += '\nPeers: %d' % len(peers)
             

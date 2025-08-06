@@ -9,6 +9,7 @@ import os
 import yappi
 import traceback
 from logger import Logger, print_lock_stats
+from collections import deque
 
 NEG_INF = float('-inf')
 
@@ -68,7 +69,7 @@ class Bittorrent:
         self._progress_thread = None
         self._monitor_thread = None
         self.running = True
-        self.min_heap_updated = False
+        self.rarest_pieces_updated = False
 
     def _clear_logs_directory(self):
         """Очищает содержимое папки logs при запуске"""
@@ -129,27 +130,44 @@ class Bittorrent:
             time.sleep(5)        
 
     def set_updated(self):
-        self.min_heap_updated = True
+        self.rarest_pieces_updated = True
 
     def _download_rarest_first(self):
         try:
-            min_heap: list[tuple[int, list[Peer]]] = self.peer_manager.get_rarest_piece_min_heap_copy()
-            i = 0
+            rarest_pieces: deque[deque[tuple[int, list[Peer]]]] = self.peer_manager.get_rarest_piece_rarest_pieces_copy()
+            self.rarest_pieces_updated = False
+            
+            
+            sent_blocks = 0
             sent = False
-            if min_heap and min_heap[0][1]:
+            if rarest_pieces:
                 sent = True
-                for piece_i, peers in min_heap:
-                    if self.min_heap_updated:
-                        self.min_heap_updated = False
-                        break
-                    best_peer = max(peers, key=lambda p: p.peer_score(), default=None)
-                    if best_peer and best_peer.peer_score() > NEG_INF:
-                        i += self.peer_manager.prefetch_next_blocks(piece_i, best_peer)
-                    # else:
-                        # time.sleep(0.5)
-            if not sent or i == 0:
-                # Logger.info("No peers available. Retrying...")
-                time.sleep(1)
+                while rarest_pieces and not self.rarest_pieces_updated:
+                    sent_this_iter = False
+                    for i, dq in enumerate(rarest_pieces):
+                        if sent_this_iter or self.rarest_pieces_updated:
+                            break
+                        while dq and not self.rarest_pieces_updated:
+                            piece_i, peers = dq[0]
+                            best_peer = max(peers, key=lambda p: p.peer_score(), default=None)
+                            if best_peer and best_peer.peer_score() > NEG_INF:
+                                sent_blocks_cur = self.peer_manager.prefetch_next_blocks(piece_i, best_peer)
+                                sent_blocks += sent_blocks_cur
+                                dq.popleft()
+                                if dq and i != 0 and sent_blocks_cur:
+                                    sent_this_iter = True
+                                    break
+                            else:
+                                break
+                            
+                    
+                    for _ in range(len(rarest_pieces)):
+                        dq = rarest_pieces.popleft()
+                        if dq:
+                            rarest_pieces.append(dq)
+                    
+            if not sent or sent_blocks == 0:
+                time.sleep(0.1)
         except Exception as e:
             log_error(f"Error in _download_rarest_first: {e}")
 
@@ -184,9 +202,9 @@ def main():
     
     # torrent = os.path.join('torrents', 'The_Jackbox_Party_Pack_3_MANY_PEERS_680MB.torrent')
     # torrent = os.path.join('torrents', 'REPO_300.torrent')
-    torrent = os.path.join('torrents', 'music.torrent')
+    # torrent = os.path.join('torrents', 'music.torrent')
     # torrent = os.path.join('torrents', 'manyLeeches5.torrent')
-    # torrent = os.path.join('torrents', 'Andr.torrent')
+    torrent = os.path.join('torrents', 'Andr.torrent')
     # torrent = os.path.join('torrents', 'Madison.torrent')
     # torrent = os.path.join('torrents', 'ninja.torrent')
     # torrent = os.path.join('torrents', 'FoxLake.torrent')
@@ -207,8 +225,9 @@ if __name__ == "__main__":
         main()
     finally:
         yappi.stop()
-        yappi.get_func_stats().save("profile/profile.callgrind", type="CALLGRIND")
-        yappi.get_func_stats().save("profile/profile.pstat", type="pstat")
+        stats = yappi.get_func_stats()
+        stats.save("profile/profile.callgrind", type="CALLGRIND")
+        stats.save("profile/profile.pstat", type="pstat")
 
 
         # yappi.get_func_stats().save("profile/yappi.prof", type="pstat")

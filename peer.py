@@ -11,7 +11,7 @@ import queue
 from collections import deque
 
 MAX_CONNECTION_ATTEMPTS = 3
-MAX_PENDING_REQUESTS = 128
+MAX_PENDING_REQUESTS = 256
 CONNECTION_TIMEOUT = 10
 INACTIVITY_TIMEOUT = 180
 
@@ -318,7 +318,7 @@ class Peer:
                 pass
 
     def peer_score(self):
-        if self.peer_choking or not self.connected or self.pending_requests_down > 1024 or self.pending_requests_down > max(32, (self._download_speed / (1024 * 1024)) * MAX_PENDING_REQUESTS):
+        if self.peer_choking or not self.connected or self.pending_requests_down > max(32, (self._download_speed / (1024 * 1024)) * MAX_PENDING_REQUESTS):
             return float('-inf')
 
         if self.requests_sent_down > 0:

@@ -21,15 +21,15 @@ class Piece:
         self._piece_size: int = piece_size
         self.number_of_blocks = (piece_size + BLOCK_SIZE - 1) // BLOCK_SIZE
         
-        self._blocks_empty = 0 if downloaded else (1 << self.number_of_blocks) - 1
+        self._blocks_empty: int = 0 if downloaded else (1 << self.number_of_blocks) - 1
         self._blocks_empty_lock = threading.Lock()
         
-        self._blocks_requested = 0
+        self._blocks_requested: int = 0
         self._blocks_requested_lock = threading.Lock()
         
-        self._block_states = [Status.DOWNLOADED] * self.number_of_blocks if downloaded else [Status.EMPTY] * self.number_of_blocks
-
-        self._block_states_lock = RWLock("_block_states_lock")
+        self._blocks_downloaded: int = (1 << self.number_of_blocks) - 1 if downloaded else 0
+        self._blocks_downloaded_lock = threading.Lock()
+        
         self._block_datas: list[bytes] | None = None
         self._block_datas_lock = RWLock("_block_datas_lock")
         self._block_last_requested: list[float] = [time.time() for _ in range(self.number_of_blocks)]
@@ -56,15 +56,23 @@ class Piece:
     def _reset_requested(self, i):
         with self._blocks_requested_lock:
             self._blocks_requested &= ~(1 << i)
+            
+    def _set_downloaded(self, i):
+        with self._blocks_downloaded_lock:
+            self._blocks_downloaded |= (1 << i)
+            
+    def _reset_downloaded(self, i):
+        with self._blocks_downloaded_lock:
+            self._blocks_downloaded &= ~(1 << i)
     
     @property
     def _state(self) -> Status:
-        with self._block_states_lock.read_access:
-            # states = list(self._block_states)
-            if all(s == Status.DOWNLOADED for s in self._block_states):
-                return Status.DOWNLOADED
-            if any(s == Status.REQUESTED for s in self._block_states) or (Status.DOWNLOADED in self._block_states and Status.EMPTY in self._block_states):
-                return Status.REQUESTED
+        if self._blocks_downloaded == (1 << self.number_of_blocks) - 1:
+            return Status.DOWNLOADED
+        # print(bin(self._blocks_downloaded))
+        # print(bin((1 << self.number_of_blocks) - 1))
+        if self._blocks_requested or (self._blocks_downloaded and self._blocks_empty):
+            return Status.REQUESTED
         return Status.EMPTY
 
     def get_blocks_to_reset(self, timeout) -> list[int]:
@@ -77,31 +85,30 @@ class Piece:
                         res.append(i)
         return res
                         
-            #  if (state == Status.DOWNLOADED and self._block_states[block_index] != state == Status.REQUESTED) or (state == Status.REQUESTED and self._block_states[block_index] != state == Status.EMPTY):
-            # print(f"{self._block_states[block_index]} to {state}")             
     def set_block_state(self, block_index: int, state: Status, data: bytes = None, last_requested = None, peer: Peer = None, skip_notify: bool = False):
         with self._set_status_lock:
             prev_state = self._cur_status
-            with self._block_states_lock.write_access:
-                if state == Status.DOWNLOADED or self._block_states[block_index] != Status.DOWNLOADED:
-                    self._block_states[block_index] = state
-                    cancel = False
-                else:
-                    cancel = True
+            if state == Status.DOWNLOADED or (self._blocks_downloaded & (1 << block_index) == 0):
+                cancel = False
+            else:
+                print("set cancel")
+                cancel = True
                     
             if not cancel:
-                self._cur_status = self._state
-                cur_state = self._cur_status
-                
                 if state == Status.EMPTY:
                     self._set_empty(block_index)
                     self._reset_requested(block_index)
+                    self._reset_downloaded(block_index)
                 elif state == Status.REQUESTED:
                     self._set_requested(block_index)
                     self._reset_empty(block_index)
+                    self._reset_downloaded(block_index)
                 else:
                     self._reset_empty(block_index)
                     self._reset_requested(block_index)
+                    self._set_downloaded(block_index)
+                self._cur_status = self._state
+                cur_state = self._cur_status
                 if data:
                     if not self._block_datas:
                         self._block_datas = [b''] * self.number_of_blocks
